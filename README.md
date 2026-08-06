@@ -1,6 +1,12 @@
-# Kuberniva
+<p align="center">
+  <img src="public/kuberniva-mark.png" alt="Kuberniva logo" width="160">
+</p>
 
-**Kubernetes, in focus.** Kuberniva is a fast local Kubernetes workspace for moving between clusters, resources, logs, and safe operations without loading sample data.
+<h1 align="center">Kuberniva</h1>
+
+<p align="center"><strong>Kubernetes, in focus.</strong><br>Fast, native cluster operations for people who work across many Kubernetes environments.</p>
+
+Kuberniva is a fast local Kubernetes workspace for moving between clusters, resources, logs, and safe operations without loading sample data.
 
 It discovers contexts from a file or folder of kubeconfigs, connects lazily when you select a cluster, and works with OIDC `exec` authentication. It supports Kubernetes API resources and CRDs, namespace-aware resource browsing, live node CPU/memory, pod logs, ConfigMap and Secret editing, YAML editing, certificate expiry, and native Pod port forwarding.
 
