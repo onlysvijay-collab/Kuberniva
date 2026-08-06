@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { Activity, Bell, Boxes, ChevronRight, CircleDot, Command, Container, Database, FileSearch, LayoutDashboard, Menu, RefreshCw, Search, ScrollText, Settings2, SlidersHorizontal, Star, Workflow } from '@lucide/svelte';
 
-  type View = 'Clusters' | 'Favorites' | 'Overview' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Settings';
+  type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Settings';
   type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Storage' | 'Cluster' | 'Custom Resources';
   type ResourceDescriptor = { group: string; version: string; apiVersion: string; kind: string; plural: string; namespaced: boolean; category: ResourceCategory; custom: boolean; crd: boolean };
   type ClusterCatalog = { context: string; namespaces: string[]; resources: ResourceDescriptor[] };
@@ -16,8 +16,13 @@
   type CertificateInfo = { expiresAt: string; daysRemaining: number; expired: boolean };
   type ResourceDetail = { manifest: Record<string, unknown>; yaml: string; certificate?: CertificateInfo };
   type EditorEntry = { key: string; value: string };
-  type NodeOverview = { name: string; ready: boolean; cpuCapacity?: string; memoryCapacity?: string; cpuUsage?: string; memoryUsage?: string; cpuUsagePercent?: number; memoryUsagePercent?: number };
+  type NodeProperty = { key: string; value: string };
+  type NodeAddress = { type: string; address: string };
+  type NodeCondition = { type: string; status: string; reason?: string; message?: string; lastHeartbeatTime?: string; lastTransitionTime?: string };
+  type NodeTaint = { key: string; value?: string; effect: string; timeAdded?: string };
+  type NodeOverview = { name: string; ready: boolean; roles: string[]; labels: NodeProperty[]; annotations: NodeProperty[]; addresses: NodeAddress[]; conditions: NodeCondition[]; taints: NodeTaint[]; architecture?: string; operatingSystem?: string; osImage?: string; kernelVersion?: string; kubeletVersion?: string; containerRuntimeVersion?: string; podCidrs: string[]; providerId?: string; unschedulable: boolean; uid?: string; creationTimestamp?: string; capacity: NodeProperty[]; allocatable: NodeProperty[]; cpuCapacity?: string; memoryCapacity?: string; cpuUsage?: string; memoryUsage?: string; cpuUsagePercent?: number; memoryUsagePercent?: number };
   type ClusterOverview = { nodes: NodeOverview[]; metricsAvailable: boolean; observedAt: string };
+  type ClusterEvent = { name: string; namespace?: string; eventType: string; reason?: string; message?: string; involvedKind?: string; involvedName?: string; action?: string; count?: number; source?: string; firstObserved?: string; lastObserved?: string };
   type KubeContext = { name: string; cluster: string; namespace: string; authMethod: string; current: boolean; sourcePath?: string };
   type KubeconfigSummary = { contexts: KubeContext[]; currentContext?: string };
   type Cluster = { id: string; name: string; provider: string; status: string; tone: string; authMethod?: string; namespace?: string; kubeconfigPath?: string; sourceId?: string };
@@ -104,6 +109,14 @@
   let favoriteContextMenu: { clusterId: string; x: number; y: number } | null = null;
   let favoriteRenameId = '';
   let favoriteRenameValue = '';
+  let selectedNodeName = '';
+  let clusterEvents: ClusterEvent[] = [];
+  let loadingEvents = false;
+  let eventsError = '';
+  let eventsObservedAt = '';
+  let eventsClusterId = '';
+  let eventSearch = '';
+  let eventTypeFilter: 'All' | 'Warning' | 'Normal' = 'All';
   let clusterOverview: ClusterOverview | null = null;
   let overviewError = '';
   let loadingOverview = false;
@@ -134,6 +147,11 @@
     .filter((cluster): cluster is Cluster => Boolean(cluster))
     .slice(0, 10);
   $: favoriteContextCluster = favoriteContextMenu ? clusters.find((cluster) => cluster.id === favoriteContextMenu?.clusterId) : null;
+  $: selectedNode = clusterOverview?.nodes.find((node) => node.name === selectedNodeName) || clusterOverview?.nodes[0] || null;
+  $: visibleClusterEvents = clusterEvents.filter((event) =>
+    (eventTypeFilter === 'All' || event.eventType === eventTypeFilter) &&
+    `${event.reason || ''} ${event.message || ''} ${event.involvedKind || ''} ${event.involvedName || ''} ${event.namespace || ''}`.toLowerCase().includes(eventSearch.toLowerCase()),
+  );
   $: visibleResources = catalog.resources.filter((resource) =>
     (selectedCategory === 'All resources' || resource.category === selectedCategory) &&
     `${resource.kind} ${resource.plural} ${resource.group}`.toLowerCase().includes(resourceSearch.toLowerCase()),
@@ -370,6 +388,16 @@
     return `${Math.round(percent)}% used`;
   }
 
+  function formatObservedTime(value?: string) {
+    if (!value) return 'Time unavailable';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  function eventTone(eventType: string) {
+    return eventType.toLowerCase() === 'warning' ? 'warning' : 'normal';
+  }
+
   function remainingPercentLabel(percent?: number) {
     if (percent === undefined) return '';
     const remaining = Math.max(0, 100 - percent);
@@ -398,11 +426,38 @@
         kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
         context: activeCluster,
       });
-      if (overviewClusterId === activeClusterId) clusterOverview = response;
+      if (overviewClusterId === activeClusterId) {
+        clusterOverview = response;
+        selectedNodeName = response.nodes.some((node) => node.name === selectedNodeName) ? selectedNodeName : response.nodes[0]?.name || '';
+      }
     } catch (error) {
       if (overviewClusterId === activeClusterId) overviewError = String(error);
     } finally {
       if (overviewClusterId === activeClusterId) loadingOverview = false;
+    }
+  }
+
+  async function loadClusterEvents(force = false) {
+    if (!activeClusterId || loadingEvents) return;
+    if (!force && clusterEvents.length && eventsObservedAt && activeClusterId === eventsClusterId) return;
+    const requestClusterId = activeClusterId;
+    loadingEvents = true;
+    eventsError = '';
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const response = await invoke<ClusterEvent[]>('read_cluster_events', {
+        kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
+        context: activeCluster,
+      });
+      if (requestClusterId === activeClusterId) {
+        clusterEvents = response;
+        eventsClusterId = requestClusterId;
+        eventsObservedAt = new Date().toISOString();
+      }
+    } catch (error) {
+      if (requestClusterId === activeClusterId) eventsError = String(error);
+    } finally {
+      if (requestClusterId === activeClusterId) loadingEvents = false;
     }
   }
 
@@ -562,6 +617,10 @@
     if (view === 'Overview' && activeClusterId) {
       void loadClusterOverview();
       startOverviewRefresh();
+      return;
+    }
+    if (view === 'Events' && activeClusterId) {
+      void loadClusterEvents();
       return;
     }
     if (view !== 'Overview') stopOverviewRefresh();
@@ -1325,6 +1384,12 @@
     activeClusterId = cluster.id;
     activeCluster = cluster.name;
     activeKubeconfigPath = cluster.kubeconfigPath;
+    if (eventsClusterId !== cluster.id) {
+      clusterEvents = [];
+      eventsObservedAt = '';
+      eventsError = '';
+      eventsClusterId = '';
+    }
     restoreClusterSession(cluster);
     catalogError = '';
     overviewError = '';
@@ -1337,6 +1402,8 @@
       if (activeView === 'Overview') {
         void loadClusterOverview();
         startOverviewRefresh();
+      } else if (activeView === 'Events') {
+        void loadClusterEvents(true);
       }
       return;
     }
@@ -1354,6 +1421,8 @@
       if (activeView === 'Overview') {
         void loadClusterOverview();
         startOverviewRefresh();
+      } else if (activeView === 'Events') {
+        void loadClusterEvents(true);
       }
     } catch (error) {
       catalogError = String(error);
@@ -1448,6 +1517,10 @@
         activeKubeconfigPath = undefined;
         catalog = { context: '', namespaces: [], resources: [] };
         clusterOverview = null;
+        clusterEvents = [];
+        eventsObservedAt = '';
+        eventsError = '';
+        eventsClusterId = '';
         selectedResource = null;
         closeEditor();
         closeYamlEditor();
@@ -1598,12 +1671,13 @@
 
     <nav aria-label="Cluster navigation">
       <p class="eyebrow">Cluster workspace</p>
-      {#each ['Overview', 'Workloads', 'Resources'] as view}
+      {#each ['Overview', 'Events', 'Workloads', 'Resources'] as view}
         <button class:active={activeView === view} class="nav-item" on:click={() => navigateTo(view as View)}>
           <span class="nav-icon">
-            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
+            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
           </span>
           {view}
+          {#if view === 'Events' && clusterEvents.length}<span class="count">{clusterEvents.length}</span>{/if}
           {#if view === 'Workloads' && workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}
           {#if view === 'Resources'}<span class="count">{activeClusterId ? catalog.resources.length : 0}</span>{/if}
         </button>
@@ -1724,6 +1798,38 @@
             <section class="empty-view favorites-empty"><div class="explore-orbit"><Star size={28} /></div><h2>No favorite clusters yet</h2><p>Open Cluster manager and use the star in a cluster row to create a shortcut here.</p><button class="primary" on:click={() => navigateTo('Clusters')}>Open Cluster manager</button></section>
           {/if}
         </section>
+      {:else if activeView === 'Events'}
+        <section class="events-page panel">
+          <div class="events-heading">
+            <div><p class="eyebrow">Cluster activity</p><h2>Events</h2><p>Recent Kubernetes events across {activeCluster}. Warnings stay visible until the API server expires them.</p></div>
+            <div class="events-actions"><small>{eventsObservedAt ? `Updated ${formatObservedTime(eventsObservedAt)}` : 'Not loaded yet'}</small><button class="secondary" disabled={loadingEvents || !activeClusterId} on:click={() => loadClusterEvents(true)}>↻ {loadingEvents ? 'Fetching…' : 'Refresh events'}</button></div>
+          </div>
+          {#if !activeClusterId}
+            <div class="events-empty"><ScrollText size={28} /><h3>Select a cluster first</h3><p>Events are fetched only after a live cluster is selected.</p></div>
+          {:else if loadingEvents && !clusterEvents.length}
+            <div class="events-loading"><i></i><div><h3>Reading cluster events…</h3><p>Fetching the latest Kubernetes Event objects.</p></div></div>
+          {:else if eventsError}
+            <div class="events-error"><ScrollText size={24} /><div><h3>Events could not be loaded</h3><p>{eventsError}</p></div><button class="secondary" on:click={() => loadClusterEvents(true)}>Try again</button></div>
+          {:else}
+            <div class="events-toolbar">
+              <label class="events-search"><Search size={15} /><input bind:value={eventSearch} placeholder="Filter events, reasons, objects…" aria-label="Filter cluster events" /></label>
+              <div class="events-filter" role="group" aria-label="Event severity"><button class:active={eventTypeFilter === 'All'} on:click={() => (eventTypeFilter = 'All')}>All <b>{clusterEvents.length}</b></button><button class:active={eventTypeFilter === 'Warning'} on:click={() => (eventTypeFilter = 'Warning')}>Warnings <b>{clusterEvents.filter((event) => event.eventType === 'Warning').length}</b></button><button class:active={eventTypeFilter === 'Normal'} on:click={() => (eventTypeFilter = 'Normal')}>Normal <b>{clusterEvents.filter((event) => event.eventType !== 'Warning').length}</b></button></div>
+            </div>
+            {#if visibleClusterEvents.length}
+              <div class="events-list" role="list" aria-label="Cluster events">
+                {#each visibleClusterEvents as event}
+                  <article class:event-warning={eventTone(event.eventType) === 'warning'} class="event-card" role="listitem">
+                    <span class="event-severity">{event.eventType === 'Warning' ? '!' : '·'}</span>
+                    <div class="event-card-main"><div class="event-card-title"><strong>{event.reason || event.eventType}</strong><span>{event.involvedKind || 'Cluster'}{event.involvedName ? ` · ${event.involvedName}` : ''}</span></div><p>{event.message || 'No event message was supplied.'}</p><div class="event-card-meta"><span>{event.namespace || 'cluster scope'}</span>{#if event.source}<span>{event.source}</span>{/if}{#if event.action}<span>{event.action}</span>{/if}{#if event.count && event.count > 1}<span>×{event.count}</span>{/if}</div></div>
+                    <time datetime={event.lastObserved || event.firstObserved || ''}>{formatObservedTime(event.lastObserved || event.firstObserved)}</time>
+                  </article>
+                {/each}
+              </div>
+            {:else}
+              <div class="events-empty"><ScrollText size={28} /><h3>{clusterEvents.length ? 'No matching events' : 'No recent events'}</h3><p>{clusterEvents.length ? 'Try a different filter or severity.' : 'This cluster has not returned any retained Kubernetes events.'}</p></div>
+            {/if}
+          {/if}
+        </section>
       {:else if activeView === 'Overview'}
         {#if !activeClusterId}
           <section class="empty-view"><div class="explore-orbit"><i></i><i></i><b>⌁</b></div><h2>Select a cluster</h2><p>{clusters.length} kubeconfig context{clusters.length === 1 ? '' : 's'} loaded locally. Click one in the sidebar when you are ready to authenticate and connect.</p></section>
@@ -1745,24 +1851,33 @@
             {#if clusterOverview.nodes.length === 0}
               <div class="node-empty">No Nodes were returned by this cluster.</div>
             {:else}
-              <div class="node-table">
-                <div class="node-row node-header"><span>Node</span><span>Health</span><span>CPU utilization</span><span>Memory utilization</span></div>
-                {#each clusterOverview.nodes as node}
-                  <div class="node-row">
-                    <div class="node-name"><i class:ready={node.ready}></i><strong>{node.name}</strong></div>
-                    <span class:ready-state={node.ready} class="node-state">{node.ready ? 'Ready' : 'Not ready'}</span>
-                    <div class="node-reading">
-                      <div class="usage-reading"><strong>{node.cpuUsage || '—'}</strong><b>{usagePercentLabel(node.cpuUsagePercent)}</b></div>
-                      {#if node.cpuUsagePercent !== undefined}<div class="usage-meter" aria-label={`CPU ${usagePercentLabel(node.cpuUsagePercent)}`}><i style:width={`${node.cpuUsagePercent}%`}></i></div>{/if}
-                      <span>{node.cpuUsage ? `${node.cpuUsage} used of ${node.cpuCapacity || 'unknown capacity'} · ${remainingPercentLabel(node.cpuUsagePercent)}` : `Capacity ${node.cpuCapacity || 'unavailable'}`}</span>
+              <div class="node-workbench">
+                <aside class="node-list" aria-label="Cluster nodes">
+                  {#each clusterOverview.nodes as node}
+                    <button class:node-list-active={node.name === selectedNode?.name} on:click={() => (selectedNodeName = node.name)}>
+                      <span class="node-list-mark"><i class:ready={node.ready}></i></span>
+                      <span><strong>{node.name}</strong><small>{node.roles.length ? node.roles.join(' · ') : 'Worker node'} · {node.architecture || 'architecture unavailable'}</small></span>
+                      <b>›</b>
+                    </button>
+                  {/each}
+                </aside>
+                {#if selectedNode}
+                  <div class="node-inspector">
+                    <div class="node-inspector-heading"><div><p class="eyebrow">Node details</p><h3>{selectedNode.name}</h3><p>{selectedNode.ready ? 'Ready and accepting workloads' : 'Not ready · scheduling may be affected'}</p></div><span class:node-inspector-not-ready={!selectedNode.ready} class="node-inspector-status">{selectedNode.ready ? 'Ready' : 'Not ready'}</span></div>
+                    <div class="node-detail-grid">
+                      <div><span>Architecture</span><strong>{selectedNode.architecture || '—'}</strong></div><div><span>OS image</span><strong>{selectedNode.osImage || '—'}</strong></div><div><span>Kubelet</span><strong>{selectedNode.kubeletVersion || '—'}</strong></div><div><span>Runtime</span><strong>{selectedNode.containerRuntimeVersion || '—'}</strong></div>
                     </div>
-                    <div class="node-reading">
-                      <div class="usage-reading"><strong>{node.memoryUsage || '—'}</strong><b>{usagePercentLabel(node.memoryUsagePercent)}</b></div>
-                      {#if node.memoryUsagePercent !== undefined}<div class="usage-meter memory-meter" aria-label={`Memory ${usagePercentLabel(node.memoryUsagePercent)}`}><i style:width={`${node.memoryUsagePercent}%`}></i></div>{/if}
-                      <span>{node.memoryUsage ? `${node.memoryUsage} used of ${node.memoryCapacity || 'unknown capacity'} · ${remainingPercentLabel(node.memoryUsagePercent)}` : `Capacity ${node.memoryCapacity || 'unavailable'}`}</span>
+                    <div class="node-detail-columns">
+                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Capacity & allocation</strong><small>{selectedNode.unschedulable ? 'Cordoned' : 'Schedulable'}</small></div><div class="node-property-list">{#each selectedNode.capacity as property}<div><span>{property.key}</span><strong>{property.value}</strong><small>allocatable {selectedNode.allocatable.find((candidate) => candidate.key === property.key)?.value || '—'}</small></div>{/each}</div></section>
+                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Network & identity</strong><small>{selectedNode.podCidrs.length ? selectedNode.podCidrs.join(' · ') : 'Pod CIDR unavailable'}</small></div><div class="node-property-list">{#each selectedNode.addresses as address}<div><span>{address.type}</span><strong>{address.address}</strong></div>{/each}{#if selectedNode.providerId}<div><span>Provider</span><strong>{selectedNode.providerId}</strong></div>{/if}{#if selectedNode.uid}<div><span>UID</span><strong>{selectedNode.uid}</strong></div>{/if}</div></section>
                     </div>
+                    <div class="node-detail-columns">
+                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Conditions</strong><small>{selectedNode.conditions.length}</small></div><div class="node-condition-list">{#each selectedNode.conditions as condition}<div><span class:condition-false={condition.status !== 'True'}>{condition.status === 'True' ? '●' : '○'}</span><strong>{condition.type}</strong><small>{condition.reason || condition.message || condition.status}</small></div>{/each}</div></section>
+                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Taints</strong><small>{selectedNode.taints.length}</small></div>{#if selectedNode.taints.length}<div class="node-condition-list">{#each selectedNode.taints as taint}<div><span class="condition-false">!</span><strong>{taint.key}</strong><small>{taint.value ? `${taint.value} · ` : ''}{taint.effect}</small></div>{/each}</div>{:else}<p class="node-detail-empty">No taints are currently applied.</p>{/if}</section>
+                    </div>
+                    {#if selectedNode.labels.length}<details class="node-metadata"><summary>Labels & metadata <span>{selectedNode.labels.length} labels</span></summary><div class="node-metadata-grid">{#each selectedNode.labels as property}<span><b>{property.key}</b><em>{property.value}</em></span>{/each}</div></details>{/if}
                   </div>
-                {/each}
+                {/if}
               </div>
             {/if}
           </section>

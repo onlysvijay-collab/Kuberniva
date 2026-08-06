@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
-use k8s_openapi::api::core::v1::{Namespace, Node, Pod};
+use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod};
 use kube::{
     api::{Api, AttachParams, DeleteParams, DynamicObject, ListParams, LogParams},
     config::{KubeConfigOptions, Kubeconfig},
@@ -268,6 +268,25 @@ struct PortForwardInfo {
 struct NodeOverview {
     name: String,
     ready: bool,
+    roles: Vec<String>,
+    labels: Vec<NodeProperty>,
+    annotations: Vec<NodeProperty>,
+    addresses: Vec<NodeAddressOverview>,
+    conditions: Vec<NodeConditionOverview>,
+    taints: Vec<NodeTaintOverview>,
+    architecture: Option<String>,
+    operating_system: Option<String>,
+    os_image: Option<String>,
+    kernel_version: Option<String>,
+    kubelet_version: Option<String>,
+    container_runtime_version: Option<String>,
+    pod_cidrs: Vec<String>,
+    provider_id: Option<String>,
+    unschedulable: bool,
+    uid: Option<String>,
+    creation_timestamp: Option<String>,
+    capacity: Vec<NodeProperty>,
+    allocatable: Vec<NodeProperty>,
     cpu_capacity: Option<String>,
     memory_capacity: Option<String>,
     cpu_usage: Option<String>,
@@ -278,10 +297,65 @@ struct NodeOverview {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct NodeProperty {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeAddressOverview {
+    type_: String,
+    address: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeConditionOverview {
+    type_: String,
+    status: String,
+    reason: Option<String>,
+    message: Option<String>,
+    last_heartbeat_time: Option<String>,
+    last_transition_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeTaintOverview {
+    key: String,
+    value: Option<String>,
+    effect: String,
+    time_added: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ClusterOverview {
     nodes: Vec<NodeOverview>,
     metrics_available: bool,
     observed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClusterEvent {
+    name: String,
+    namespace: Option<String>,
+    event_type: String,
+    reason: Option<String>,
+    message: Option<String>,
+    involved_kind: Option<String>,
+    involved_name: Option<String>,
+    action: Option<String>,
+    count: Option<i32>,
+    source: Option<String>,
+    first_observed: Option<String>,
+    last_observed: Option<String>,
+}
+
+fn node_time_string(time: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>) -> Option<String> {
+    time.map(|value| value.0.to_string())
 }
 
 fn resolve_local_path(input: &str) -> PathBuf {
@@ -1029,7 +1103,34 @@ async fn read_cluster_overview(
         .items
         .into_iter()
         .filter_map(|node| {
-            let name = node.metadata.name?;
+            let name = node.metadata.name.clone()?;
+            let label_map = node.metadata.labels.clone().unwrap_or_default();
+            let roles = {
+                let mut roles = label_map
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        if key == "kubernetes.io/role" {
+                            Some(value.clone())
+                        } else {
+                            key.strip_prefix("node-role.kubernetes.io/")
+                                .map(|role| if role.is_empty() { "worker".to_string() } else { role.to_string() })
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                roles.sort();
+                roles.dedup();
+                roles
+            };
+            let labels = label_map
+                .iter()
+                .map(|(key, value)| NodeProperty { key: key.clone(), value: value.clone() })
+                .collect::<Vec<_>>();
+            let annotations = node
+                .metadata
+                .annotations
+                .as_ref()
+                .map(|values| values.iter().map(|(key, value)| NodeProperty { key: key.clone(), value: value.clone() }).collect())
+                .unwrap_or_default();
             let ready = node
                 .status
                 .as_ref()
@@ -1044,6 +1145,10 @@ async fn read_cluster_overview(
                 .status
                 .as_ref()
                 .and_then(|status| status.capacity.as_ref());
+            let allocatable = node
+                .status
+                .as_ref()
+                .and_then(|status| status.allocatable.as_ref());
             let (cpu_usage, memory_usage) = metrics.get(&name).cloned().unwrap_or((None, None));
             let cpu_capacity = capacity
                 .and_then(|capacity| capacity.get("cpu"))
@@ -1051,9 +1156,67 @@ async fn read_cluster_overview(
             let memory_capacity = capacity
                 .and_then(|capacity| capacity.get("memory"))
                 .map(|quantity| quantity.0.clone());
+            let capacity = capacity
+                .map(|values| values.iter().map(|(key, value)| NodeProperty { key: key.clone(), value: value.0.clone() }).collect())
+                .unwrap_or_default();
+            let allocatable = allocatable
+                .map(|values| values.iter().map(|(key, value)| NodeProperty { key: key.clone(), value: value.0.clone() }).collect())
+                .unwrap_or_default();
+            let status = node.status.as_ref();
+            let node_info = status.and_then(|status| status.node_info.as_ref());
+            let conditions = status
+                .and_then(|status| status.conditions.as_ref())
+                .map(|values| values.iter().map(|condition| NodeConditionOverview {
+                    type_: condition.type_.clone(),
+                    status: condition.status.clone(),
+                    reason: condition.reason.clone(),
+                    message: condition.message.clone(),
+                    last_heartbeat_time: node_time_string(condition.last_heartbeat_time.as_ref()),
+                    last_transition_time: node_time_string(condition.last_transition_time.as_ref()),
+                }).collect())
+                .unwrap_or_default();
+            let addresses = status
+                .and_then(|status| status.addresses.as_ref())
+                .map(|values| values.iter().map(|address| NodeAddressOverview { type_: address.type_.clone(), address: address.address.clone() }).collect())
+                .unwrap_or_default();
+            let taints = node
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.taints.as_ref())
+                .map(|values| values.iter().map(|taint| NodeTaintOverview {
+                    key: taint.key.clone(),
+                    value: taint.value.clone(),
+                    effect: taint.effect.clone(),
+                    time_added: node_time_string(taint.time_added.as_ref()),
+                }).collect())
+                .unwrap_or_default();
+            let pod_cidrs = node
+                .spec
+                .as_ref()
+                .map(|spec| spec.pod_cidrs.clone().unwrap_or_else(|| spec.pod_cidr.clone().into_iter().collect()))
+                .unwrap_or_default();
             Some(NodeOverview {
                 name,
                 ready,
+                roles,
+                labels,
+                annotations,
+                addresses,
+                conditions,
+                taints,
+                architecture: node_info.map(|info| info.architecture.clone()),
+                operating_system: node_info.map(|info| info.operating_system.clone()),
+                os_image: node_info.map(|info| info.os_image.clone()),
+                kernel_version: node_info.map(|info| info.kernel_version.clone()),
+                kubelet_version: node_info.map(|info| info.kubelet_version.clone()),
+                container_runtime_version: node_info.map(|info| info.container_runtime_version.clone()),
+                pod_cidrs,
+                provider_id: node.spec.as_ref().and_then(|spec| spec.provider_id.clone()),
+                unschedulable: node.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false),
+                uid: node.metadata.uid.clone(),
+                creation_timestamp: node_time_string(node.metadata.creation_timestamp.as_ref()),
+                capacity,
+                allocatable,
                 cpu_usage_percent: usage_percent(
                     cpu_usage.as_deref(),
                     cpu_capacity.as_deref(),
@@ -1077,6 +1240,57 @@ async fn read_cluster_overview(
         metrics_available,
         observed_at: Utc::now().to_rfc3339(),
     })
+}
+
+#[tauri::command]
+async fn read_cluster_events(
+    kubeconfig_path: Option<String>,
+    context: Option<String>,
+) -> Result<Vec<ClusterEvent>, String> {
+    let client = client_for(kubeconfig_path, context).await?;
+    let params = ListParams { limit: Some(250), ..Default::default() };
+    let mut events = Api::<Event>::all(client)
+        .list(&params)
+        .await
+        .map_err(|error| error.to_string())?
+        .items
+        .into_iter()
+        .filter_map(|event| {
+            let name = event.metadata.name.clone()?;
+            let last_observed = event
+                .event_time
+                .as_ref()
+                .map(|time| time.0.to_string())
+                .or_else(|| node_time_string(event.last_timestamp.as_ref()))
+                .or_else(|| node_time_string(event.first_timestamp.as_ref()))
+                .or_else(|| node_time_string(event.metadata.creation_timestamp.as_ref()));
+            let first_observed = event
+                .first_timestamp
+                .as_ref()
+                .and_then(|time| node_time_string(Some(time)))
+                .or_else(|| event.event_time.as_ref().map(|time| time.0.to_string()));
+            let source = event
+                .reporting_component
+                .clone()
+                .or_else(|| event.source.as_ref().and_then(|source| source.component.clone()));
+            Some(ClusterEvent {
+                name,
+                namespace: event.metadata.namespace.clone().or(event.involved_object.namespace.clone()),
+                event_type: event.type_.unwrap_or_else(|| "Normal".to_string()),
+                reason: event.reason,
+                message: event.message,
+                involved_kind: event.involved_object.kind,
+                involved_name: event.involved_object.name,
+                action: event.action,
+                count: event.count.or_else(|| event.series.as_ref().and_then(|series| series.count)),
+                source,
+                first_observed,
+                last_observed,
+            })
+        })
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| right.last_observed.cmp(&left.last_observed));
+    Ok(events)
 }
 
 #[tauri::command]
@@ -1726,6 +1940,7 @@ pub fn run() {
             invalidate_cluster_client,
             discover_cluster_catalog,
             read_cluster_overview,
+            read_cluster_events,
             list_resource_objects,
             get_resource_detail,
             delete_resource_object,
