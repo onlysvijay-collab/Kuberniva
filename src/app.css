@@ -749,6 +749,17 @@ main {
 .node-detail-grid > div { min-width: 0; display: grid; gap: 4px; padding: 9px; border: 1px solid #e6e8ee; border-radius: 8px; background: #fbfcfe; }
 .node-detail-grid span, .node-property-list span { color: #8a95a5; font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .node-detail-grid strong { overflow: hidden; color: #42516a; font-family: "DM Mono", monospace; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.node-metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 10px; }
+.node-metric-card { min-width: 0; display: grid; gap: 7px; padding: 12px; border: 1px solid #dedaf8; border-radius: 10px; background: linear-gradient(135deg, #f4f2ff, #fff); }
+.node-metric-card.node-metric-memory { border-color: #d1ebe5; background: linear-gradient(135deg, #effbf8, #fff); }
+.node-metric-heading { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: baseline; gap: 8px; }
+.node-metric-heading span { color: #68758a; font-size: 9px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.node-metric-heading strong { grid-row: 2; color: #334057; font-family: "DM Mono", monospace; font-size: 14px; font-weight: 700; }
+.node-metric-heading b { grid-column: 2; grid-row: 2; color: #655ad0; font-family: "DM Mono", monospace; font-size: 9px; font-weight: 600; white-space: nowrap; }
+.node-metric-memory .node-metric-heading b { color: #318f82; }
+.node-metric-card small { overflow: hidden; color: #7c899b; font-family: "DM Mono", monospace; font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.node-metric-card .usage-meter { height: 8px; background: #e3e1f3; }
+.node-metric-card.node-metric-memory .usage-meter { background: #dcefeb; }
 .node-detail-columns { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 10px; }
 .node-detail-section { min-width: 0; padding: 11px; border: 1px solid #e6e8ee; border-radius: 9px; background: #fff; }
 .node-detail-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
@@ -778,6 +789,7 @@ main {
   .cluster-overview-dashboard { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(0,1fr); }
   .cluster-overview-dashboard .overview-quick-actions { grid-template-columns: 1fr; }
   .node-detail-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .node-metrics-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 680px) {
   .events-heading, .events-toolbar { align-items: stretch; flex-direction: column; }
