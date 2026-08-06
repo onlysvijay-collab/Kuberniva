@@ -22,7 +22,7 @@
   type KubeconfigSummary = { contexts: KubeContext[]; currentContext?: string };
   type Cluster = { id: string; name: string; provider: string; status: string; tone: string; authMethod?: string; namespace?: string; kubeconfigPath?: string; sourceId?: string };
   type ClusterSession = { namespace: string; selectedCategory: ResourceCategory | 'All resources'; resourceSearch: string; workloadResource: ResourceDescriptor | null; workloadObjects: ResourceObject[]; workloadSearch: string; clusterOverview: ClusterOverview | null };
-  type PersistedWorkspace = { version: 4; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[] };
+  type PersistedWorkspace = { version: 5; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string> };
   type DeletionTarget =
     | { type: 'resource'; resource: ResourceDescriptor; object: ResourceObject }
     | { type: 'cluster'; cluster: Cluster };
@@ -100,6 +100,10 @@
   let sidebarHidden = false;
   let persistedClusterNamespaces: Record<string, string> = {};
   let favoriteClusterIds: string[] = [];
+  let favoriteClusterNames: Record<string, string> = {};
+  let favoriteContextMenu: { clusterId: string; x: number; y: number } | null = null;
+  let favoriteRenameId = '';
+  let favoriteRenameValue = '';
   let clusterOverview: ClusterOverview | null = null;
   let overviewError = '';
   let loadingOverview = false;
@@ -129,6 +133,7 @@
     .map((id) => clusters.find((cluster) => cluster.id === id))
     .filter((cluster): cluster is Cluster => Boolean(cluster))
     .slice(0, 10);
+  $: favoriteContextCluster = favoriteContextMenu ? clusters.find((cluster) => cluster.id === favoriteContextMenu?.clusterId) : null;
   $: visibleResources = catalog.resources.filter((resource) =>
     (selectedCategory === 'All resources' || resource.category === selectedCategory) &&
     `${resource.kind} ${resource.plural} ${resource.group}`.toLowerCase().includes(resourceSearch.toLowerCase()),
@@ -157,7 +162,7 @@
     try {
       if (activeClusterId) persistedClusterNamespaces = { ...persistedClusterNamespaces, [activeClusterId]: namespace };
       const workspace: PersistedWorkspace = {
-        version: 4,
+        version: 5,
         sourceConfigured,
         kubeconfigPath,
         kubeconfigPaths: kubeconfigSources,
@@ -166,6 +171,15 @@
         sidebarHidden,
         clusterNamespaces: persistedClusterNamespaces,
         favoriteClusterIds: favoriteClusterIds.filter((id) => clusters.some((cluster) => cluster.id === id)).slice(0, 10),
+        favoriteClusterNames: Object.fromEntries(
+          favoriteClusterIds
+            .filter((id) => clusters.some((cluster) => cluster.id === id))
+            .slice(0, 10)
+            .flatMap((id) => {
+              const label = favoriteClusterNames[id]?.trim();
+              return label ? [[id, label]] : [];
+            }),
+        ),
       };
       window.localStorage.setItem(workspaceStorageKey, JSON.stringify(workspace));
     } catch {
@@ -187,9 +201,10 @@
         sidebarHidden?: unknown;
         clusterNamespaces?: unknown;
         favoriteClusterIds?: unknown;
+        favoriteClusterNames?: unknown;
       };
-      if ((parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4) || typeof parsed.sourceConfigured !== 'boolean' || typeof parsed.kubeconfigPath !== 'string') return null;
-      const kubeconfigPaths = (parsed.version === 2 || parsed.version === 3 || parsed.version === 4) && Array.isArray(parsed.kubeconfigPaths)
+      if ((parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || typeof parsed.sourceConfigured !== 'boolean' || typeof parsed.kubeconfigPath !== 'string') return null;
+      const kubeconfigPaths = (parsed.version === 2 || parsed.version === 3 || parsed.version === 4 || parsed.version === 5) && Array.isArray(parsed.kubeconfigPaths)
         ? [...new Set(parsed.kubeconfigPaths.filter((path): path is string => typeof path === 'string').map((path) => path.trim()))]
         : [parsed.kubeconfigPath.trim()];
       const cachedClusters = Array.isArray(parsed.clusters)
@@ -216,8 +231,11 @@
       const favoriteClusterIds = Array.isArray(parsed.favoriteClusterIds)
         ? [...new Set(parsed.favoriteClusterIds.filter((id): id is string => typeof id === 'string' && cachedClusters.some((cluster) => cluster.id === id)))].slice(0, 10)
         : [];
+      const favoriteClusterNames = parsed.favoriteClusterNames && typeof parsed.favoriteClusterNames === 'object' && !Array.isArray(parsed.favoriteClusterNames)
+        ? Object.fromEntries(Object.entries(parsed.favoriteClusterNames).filter(([id, label]) => favoriteClusterIds.includes(id) && typeof label === 'string' && label.trim()).map(([id, label]) => [id, String(label).trim().slice(0, 80)]))
+        : {};
       const workspace: PersistedWorkspace = {
-        version: 4,
+        version: 5,
         sourceConfigured: parsed.sourceConfigured,
         kubeconfigPath: parsed.kubeconfigPath,
         kubeconfigPaths: kubeconfigPaths.length ? kubeconfigPaths : [''],
@@ -226,6 +244,7 @@
         sidebarHidden: typeof parsed.sidebarHidden === 'boolean' ? parsed.sidebarHidden : undefined,
         clusterNamespaces,
         favoriteClusterIds,
+        favoriteClusterNames,
       };
       window.localStorage.setItem(workspaceStorageKey, JSON.stringify(workspace));
       return workspace;
@@ -331,6 +350,7 @@
     sidebarHidden = workspace.sidebarHidden || false;
     persistedClusterNamespaces = workspace.clusterNamespaces || {};
     favoriteClusterIds = workspace.favoriteClusterIds || [];
+    favoriteClusterNames = workspace.favoriteClusterNames || {};
     // Startup deliberately restores only the saved local snapshot. It never
     // rescans files or folders, so removed contexts stay removed and opening
     // Kuberniva remains immediate. Source reads happen only through Add or Sync.
@@ -429,9 +449,52 @@
     return favoriteClusterIds.includes(clusterId);
   }
 
+  function favoriteLabel(cluster: Cluster) {
+    return favoriteClusterNames[cluster.id] || cluster.name;
+  }
+
+  function openFavoriteContextMenu(event: MouseEvent, cluster: Cluster) {
+    event.preventDefault();
+    const menuWidth = 190;
+    const menuHeight = 92;
+    favoriteContextMenu = {
+      clusterId: cluster.id,
+      x: Math.min(event.clientX, window.innerWidth - menuWidth - 12),
+      y: Math.min(event.clientY, window.innerHeight - menuHeight - 12),
+    };
+  }
+
+  function startFavoriteRename(clusterId: string) {
+    const cluster = clusters.find((candidate) => candidate.id === clusterId);
+    if (!cluster) return;
+    favoriteRenameId = clusterId;
+    favoriteRenameValue = favoriteLabel(cluster);
+    favoriteContextMenu = null;
+    void tick().then(() => document.querySelector<HTMLInputElement>('.favorite-rename input')?.select());
+  }
+
+  function cancelFavoriteRename() {
+    favoriteRenameId = '';
+    favoriteRenameValue = '';
+  }
+
+  function saveFavoriteRename() {
+    const cluster = clusters.find((candidate) => candidate.id === favoriteRenameId);
+    if (!cluster) return cancelFavoriteRename();
+    const label = favoriteRenameValue.trim().slice(0, 80);
+    favoriteClusterNames = { ...favoriteClusterNames };
+    if (label && label !== cluster.name) favoriteClusterNames[cluster.id] = label;
+    else delete favoriteClusterNames[cluster.id];
+    persistWorkspace();
+    notify(label && label !== cluster.name ? `Shortcut renamed to ${label}.` : 'Shortcut reset to the cluster name.');
+    cancelFavoriteRename();
+  }
+
   function toggleFavoriteCluster(cluster: Cluster) {
     if (isFavoriteCluster(cluster.id)) {
       favoriteClusterIds = favoriteClusterIds.filter((id) => id !== cluster.id);
+      const { [cluster.id]: _removedFavoriteName, ...remainingFavoriteNames } = favoriteClusterNames;
+      favoriteClusterNames = remainingFavoriteNames;
       notify(`${cluster.name} removed from Favorites.`);
     } else if (favoriteClusterIds.length >= 10) {
       notify('Favorites is limited to 10 cluster shortcuts. Remove one before adding another.');
@@ -1246,6 +1309,7 @@
       const target = event.target instanceof Element ? event.target : null;
       if (!target?.closest('.cluster-selector')) clusterPickerOpen = false;
       if (!target?.closest('.namespace-picker, .workload-namespace-picker')) namespaceOpen = false;
+      if (!target?.closest('.favorite-context-menu, .favorite-shortcut, .favorite-card-open')) favoriteContextMenu = null;
     };
     window.addEventListener('pointerdown', closeFloatingMenus);
     return () => window.removeEventListener('pointerdown', closeFloatingMenus);
@@ -1373,7 +1437,9 @@
       clusterSessionCache.delete(cluster.id);
       const { [cluster.id]: _removedNamespace, ...remainingNamespaces } = persistedClusterNamespaces;
       persistedClusterNamespaces = remainingNamespaces;
-      favoriteClusterIds = favoriteClusterIds.filter((id) => id !== cluster.id);
+    favoriteClusterIds = favoriteClusterIds.filter((id) => id !== cluster.id);
+      const { [cluster.id]: _removedFavoriteName, ...remainingFavoriteNames } = favoriteClusterNames;
+      favoriteClusterNames = remainingFavoriteNames;
       clearClusterObjectCache(cluster.id);
       if (wasActive) {
         stopOverviewRefresh();
@@ -1532,13 +1598,12 @@
 
     <nav aria-label="Cluster navigation">
       <p class="eyebrow">Cluster workspace</p>
-      {#each ['Overview', 'Favorites', 'Workloads', 'Resources'] as view}
+      {#each ['Overview', 'Workloads', 'Resources'] as view}
         <button class:active={activeView === view} class="nav-item" on:click={() => navigateTo(view as View)}>
           <span class="nav-icon">
-            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Favorites'}<Star size={17} strokeWidth={1.8} fill={favoriteClusters.length ? 'currentColor' : 'none'} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
+            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
           </span>
           {view}
-          {#if view === 'Favorites'}<span class="count">{favoriteClusters.length}/10</span>{/if}
           {#if view === 'Workloads' && workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}
           {#if view === 'Resources'}<span class="count">{activeClusterId ? catalog.resources.length : 0}</span>{/if}
         </button>
@@ -1546,17 +1611,39 @@
     </nav>
 
     <section class="sidebar-favorites" aria-label="Favorite cluster shortcuts">
-      <div class="sidebar-favorites-heading"><span>Shortcuts</span><small>{favoriteClusters.length}/10</small></div>
+      <div class="sidebar-favorites-heading">
+        <button class:active={activeView === 'Favorites'} class="sidebar-favorites-title" on:click={() => navigateTo('Favorites')}>
+          <Star size={14} strokeWidth={1.9} fill={favoriteClusters.length ? 'currentColor' : 'none'} />
+          <span>Favorites</span>
+        </button>
+        <small>{favoriteClusters.length}/10</small>
+      </div>
       {#if favoriteClusters.length}
         {#each favoriteClusters as cluster}
-          <button class:favorite-shortcut-active={cluster.id === activeClusterId} class="favorite-shortcut" title={`Open ${cluster.name}`} on:click={() => selectCluster(cluster.id)}>
-            <i class="status-dot {cluster.tone}"></i><span>{cluster.name}</span><b>→</b>
-          </button>
+          {#if favoriteRenameId === cluster.id}
+            <form class="favorite-rename" on:submit|preventDefault={saveFavoriteRename}>
+              <input bind:value={favoriteRenameValue} maxlength="80" aria-label={`Rename ${cluster.name} shortcut`} />
+              <button type="submit" aria-label="Save shortcut name" title="Save">✓</button>
+              <button type="button" aria-label="Cancel shortcut rename" title="Cancel" on:click={cancelFavoriteRename}>×</button>
+            </form>
+          {:else}
+            <button class:favorite-shortcut-active={cluster.id === activeClusterId} class="favorite-shortcut" title={`Open ${favoriteLabel(cluster)} · right-click to rename`} on:click={() => { favoriteContextMenu = null; void selectCluster(cluster.id); }} on:contextmenu={(event) => openFavoriteContextMenu(event, cluster)}>
+              <i class="status-dot {cluster.tone}"></i><span>{favoriteLabel(cluster)}</span><b>→</b>
+            </button>
+          {/if}
         {/each}
       {:else}
-        <p>Pin up to 10 clusters from Cluster manager.</p>
+        <p>Use the star in Available clusters to add up to 10 shortcuts.</p>
       {/if}
     </section>
+
+    {#if favoriteContextMenu && favoriteContextCluster}
+      <div class="favorite-context-menu" style:left={`${favoriteContextMenu.x}px`} style:top={`${favoriteContextMenu.y}px`} role="menu" aria-label={`Actions for ${favoriteLabel(favoriteContextCluster)}`}>
+        <strong>{favoriteLabel(favoriteContextCluster)}</strong>
+        <button on:click={() => startFavoriteRename(favoriteContextCluster.id)}>Rename shortcut</button>
+        <button on:click={() => { toggleFavoriteCluster(favoriteContextCluster); favoriteContextMenu = null; }}>Remove from Favorites</button>
+      </div>
+    {/if}
 
     <div class="sidebar-bottom">
       <button class:active={activeView === 'Settings'} class="nav-item" on:click={() => navigateTo('Settings')}><span class="nav-icon"><Settings2 size={17} strokeWidth={1.8} /></span>Settings</button>
@@ -1598,14 +1685,14 @@
           <div class="clusters-landing-heading"><div><p class="eyebrow">Cluster manager</p><h2>{clusters.length} available cluster{clusters.length === 1 ? '' : 's'}</h2><p>Open a cluster to connect. Add kubeconfigs and safely remove retired contexts here; OIDC starts only for the cluster you select.</p></div><button class="secondary" on:click={() => (kubeconfigOpen = true)}>+ Add kubeconfig</button></div>
           {#if clusters.length}
             <div class="cluster-list" role="list" aria-label="Tracked clusters">
-              <div class="cluster-list-header" aria-hidden="true"><span>Cluster</span><span>Authentication</span><span>Source</span><span>Status</span><span>Shortcut</span><span></span></div>
+              <div class="cluster-list-header" aria-hidden="true"><span>Cluster</span><span>Authentication</span><span>Source</span><span>Status</span><span>Favorite</span><span></span></div>
               {#each clusters as cluster}
                 <article class:cluster-list-active={cluster.id === activeClusterId} class="cluster-list-row" role="listitem">
                   <button class="cluster-list-open" on:click={() => selectCluster(cluster.id)} title={`Open ${cluster.name}`}><span class="cluster-list-mark"><i class="status-dot {cluster.tone}"></i></span><span class="cluster-list-name"><strong>{cluster.name}</strong><small>{cluster.provider}</small></span><span class="cluster-list-arrow">Open overview →</span></button>
                   <span class="cluster-list-auth">{cluster.authMethod || 'Credentials unavailable'}</span>
                   <small class="cluster-list-source" title={cluster.kubeconfigPath || ''}>{cluster.kubeconfigPath || 'Source path unavailable'}</small>
                   <span class="cluster-list-status"><i class="status-dot {cluster.tone}"></i>{cluster.status}</span>
-                  <button class:favorite-toggle-active={isFavoriteCluster(cluster.id)} class="favorite-toggle" aria-label={`${isFavoriteCluster(cluster.id) ? 'Remove' : 'Add'} ${cluster.name} ${isFavoriteCluster(cluster.id) ? 'from' : 'to'} Favorites`} title={isFavoriteCluster(cluster.id) ? 'Remove shortcut' : 'Add shortcut'} on:click|stopPropagation={() => toggleFavoriteCluster(cluster)}><Star size={16} fill={isFavoriteCluster(cluster.id) ? 'currentColor' : 'none'} /></button>
+                  <button class:favorite-toggle-active={isFavoriteCluster(cluster.id)} class="favorite-toggle" aria-pressed={isFavoriteCluster(cluster.id)} aria-label={`${isFavoriteCluster(cluster.id) ? 'Remove' : 'Add'} ${cluster.name} ${isFavoriteCluster(cluster.id) ? 'from' : 'to'} Favorites`} title={isFavoriteCluster(cluster.id) ? 'Remove from Favorites' : 'Add to Favorites'} on:click|stopPropagation={() => toggleFavoriteCluster(cluster)}><Star size={16} fill={isFavoriteCluster(cluster.id) ? 'currentColor' : 'none'} /></button>
                   <button class="remove-cluster-list" disabled={!cluster.kubeconfigPath} title={cluster.kubeconfigPath ? `Remove ${cluster.name} from its source kubeconfig` : 'Source file is unavailable'} on:click={() => removeCluster(cluster.id)}>Remove</button>
                 </article>
               {/each}
@@ -1624,9 +1711,9 @@
             <div class="favorites-list" role="list" aria-label="Favorite clusters">
               {#each favoriteClusters as cluster}
                 <article class:favorite-card-active={cluster.id === activeClusterId} class="favorite-card" role="listitem">
-                  <button class="favorite-card-open" title={`Open ${cluster.name}`} on:click={() => selectCluster(cluster.id)}>
+                  <button class="favorite-card-open" title={`Open ${favoriteLabel(cluster)} · right-click to rename`} on:click={() => { favoriteContextMenu = null; void selectCluster(cluster.id); }} on:contextmenu={(event) => openFavoriteContextMenu(event, cluster)}>
                     <span class="favorite-card-mark"><i class="status-dot {cluster.tone}"></i></span>
-                    <span class="favorite-card-copy"><strong>{cluster.name}</strong><small>{cluster.provider} · {cluster.authMethod || 'Credentials unavailable'}</small><em>{cluster.status}</em></span>
+                    <span class="favorite-card-copy"><strong>{favoriteLabel(cluster)}</strong><small>{cluster.name} · {cluster.provider} · {cluster.authMethod || 'Credentials unavailable'}</small><em>{cluster.status}</em></span>
                     <span class="favorite-card-arrow">Open overview →</span>
                   </button>
                   <button class="favorite-card-remove" aria-label={`Remove ${cluster.name} from Favorites`} title="Remove shortcut" on:click={() => toggleFavoriteCluster(cluster)}><Star size={17} fill="currentColor" /></button>
