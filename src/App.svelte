@@ -85,6 +85,7 @@
   let editorObject: ResourceObject | null = null;
   let editorManifest: Record<string, unknown> | null = null;
   let editorEntries: EditorEntry[] = [];
+  let focusedEditorEntry = 0;
   let editorCertificate: CertificateInfo | undefined;
   let loadingEditor = false;
   let savingEditor = false;
@@ -170,6 +171,7 @@
     `${workload.name} ${workload.namespace || ''}`.toLowerCase().includes(workloadSearch.toLowerCase()),
   );
   $: suggestedForwardPorts = [...new Set(logPorts.map((port) => port.port))];
+  $: focusedEditorEntryData = editorEntries[focusedEditorEntry] || null;
 
   function notify(message: string) {
     toast = message;
@@ -701,6 +703,21 @@
     );
   }
 
+  function updateEditorEntryKey(index: number, key: string) {
+    editorEntries = editorEntries.map((entry, entryIndex) => entryIndex === index ? { ...entry, key } : entry);
+  }
+
+  function addEditorEntry() {
+    const value = editorResource?.kind === 'Secret' && revealSecret ? encodeSecret('') : '';
+    editorEntries = [...editorEntries, { key: 'new-key', value }];
+    focusedEditorEntry = editorEntries.length - 1;
+  }
+
+  function removeEditorEntry(index: number) {
+    editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index);
+    focusedEditorEntry = Math.max(0, Math.min(focusedEditorEntry, editorEntries.length - 1));
+  }
+
   function asRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
   }
@@ -982,6 +999,7 @@
     editorObject = object;
     editorManifest = null;
     editorEntries = [];
+    focusedEditorEntry = 0;
     editorCertificate = undefined;
     revealSecret = false;
     loadingEditor = true;
@@ -1092,6 +1110,7 @@
     editorObject = null;
     editorManifest = null;
     editorEntries = [];
+    focusedEditorEntry = 0;
   }
 
   async function openYamlEditor(resource: ResourceDescriptor, object: ResourceObject) {
@@ -1989,11 +2008,28 @@
                       <section class:expired={editorCertificate.expired} class="certificate-card"><div><span>⌁</span><div><strong>{editorCertificate.expired ? 'Certificate expired' : 'TLS certificate'}</strong><p>Expires {editorCertificate.expiresAt}</p></div></div><b>{editorCertificate.expired ? `${Math.abs(editorCertificate.daysRemaining)} days ago` : `${editorCertificate.daysRemaining} days remaining`}</b></section>
                     {/if}
                     {#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}
-                      <section class="configuration-inspector">
+                      <section class="configuration-inspector focus-canvas-editor">
                         <div class="configuration-data-heading"><div><span>{editorResource.kind === 'Secret' ? '◈' : '◇'}</span><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values loaded from this namespace'}</small></div></div><b>{editorEntries.length} {editorEntries.length === 1 ? 'entry' : 'entries'}</b></div>
-                        <div class="editor-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Protecting sensitive values' : 'Editable key/value data'}</strong><small>{editorResource.kind === 'Secret' ? 'Reveal only when you need to inspect or change a value.' : 'Changes are saved with the current Kubernetes resource version.'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
-                        <div class="editor-entries">{#if editorEntries.length === 0}<div class="drawer-state">This {editorResource!.kind} has no data entries.</div>{:else}{#each editorEntries as entry, index}<div class="editor-entry"><span class="editor-entry-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><label class="editor-field editor-key-field"><span>Key</span><input value={entry.key} on:input={(event) => editorEntries = editorEntries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, key: event.currentTarget.value } : candidate)} /></label><label class="editor-field editor-value-field"><span>Value</span><textarea value={editorResource!.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntry(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button class="editor-entry-remove" aria-label={`Remove ${entry.key}`} on:click={() => (editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index))}>×</button></div>{/each}{/if}</div>
-                        <button class="add-entry" on:click={() => (editorEntries = [...editorEntries, { key: 'new-key', value: editorResource!.kind === 'Secret' && revealSecret ? encodeSecret('') : '' }])}>+ Add key</button>
+                        <div class="editor-toolbar focus-canvas-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Protecting sensitive values' : 'Focus editor'}</strong><small>{editorResource.kind === 'Secret' ? 'Choose a key on the left, then reveal or edit its value.' : 'Choose a key on the left to give its value room to breathe.'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
+                        <div class="focus-canvas-shell">
+                          {#if editorEntries.length === 0}
+                            <div class="drawer-state focus-canvas-empty">This {editorResource!.kind} has no data entries.<button class="focus-canvas-empty-action" on:click={addEditorEntry}>＋ Add key</button></div>
+                          {:else}
+                            <nav class="focus-canvas-rail" aria-label={`${editorResource.kind} keys`}>
+                              <div class="focus-canvas-rail-heading"><span>Keys</span><b>{editorEntries.length}</b></div>
+                              <div class="focus-canvas-key-list">{#each editorEntries as entry, index}<button type="button" class:focus-canvas-key-active={index === focusedEditorEntry} class="focus-canvas-key" on:click={() => (focusedEditorEntry = index)}><i></i><span>{entry.key || 'Unnamed key'}</span></button>{/each}</div>
+                              <button type="button" class="focus-canvas-add" on:click={addEditorEntry}><span>＋</span>Add key</button>
+                            </nav>
+                            {#if focusedEditorEntryData}
+                              <div class="focus-canvas-main">
+                                <div class="focus-canvas-main-heading"><div><span class="focus-canvas-entry-index">{String(focusedEditorEntry + 1).padStart(2, '0')}</span><div><strong>{focusedEditorEntryData.key || 'Unnamed key'}</strong><small>Focused entry · {editorResource.kind === 'Secret' ? (revealSecret ? 'decoded locally' : 'base64 protected') : 'plain text'}</small></div></div><button type="button" class="focus-canvas-remove" on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove</button></div>
+                                <label class="focus-canvas-field"><span>Key</span><input value={focusedEditorEntryData.key} on:input={(event) => updateEditorEntryKey(focusedEditorEntry, event.currentTarget.value)} /></label>
+                                <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
+                                <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
+                              </div>
+                            {/if}
+                          {/if}
+                        </div>
                       </section>
                     {:else}
                       <div class="inspector-overview">
@@ -2213,9 +2249,29 @@
             <section class:expired={editorCertificate.expired} class="certificate-card"><div><span>⌁</span><div><strong>{editorCertificate.expired ? 'Certificate expired' : 'TLS certificate'}</strong><p>Expires {editorCertificate.expiresAt}</p></div></div><b>{editorCertificate.expired ? `${Math.abs(editorCertificate.daysRemaining)} days ago` : `${editorCertificate.daysRemaining} days remaining`}</b></section>
           {/if}
           {#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}
-            <div class="editor-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
-            <div class="editor-entries">{#if editorEntries.length === 0}<div class="drawer-state">This {editorResource!.kind} has no data entries.</div>{:else}{#each editorEntries as entry, index}<div class="editor-entry"><span class="editor-entry-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><label class="editor-field editor-key-field"><span>Key</span><input value={entry.key} on:input={(event) => editorEntries = editorEntries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, key: event.currentTarget.value } : candidate)} /></label><label class="editor-field editor-value-field"><span>Value</span><textarea value={editorResource!.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntry(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button class="editor-entry-remove" aria-label={`Remove ${entry.key}`} on:click={() => (editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index))}>×</button></div>{/each}{/if}</div>
-            <button class="add-entry" on:click={() => (editorEntries = [...editorEntries, { key: 'new-key', value: editorResource!.kind === 'Secret' && revealSecret ? encodeSecret('') : '' }])}>+ Add key</button>
+            <section class="configuration-inspector focus-canvas-editor">
+              <div class="configuration-data-heading"><div><span>{editorResource.kind === 'Secret' ? '◈' : '◇'}</span><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values'}</small></div></div><b>{editorEntries.length} {editorEntries.length === 1 ? 'entry' : 'entries'}</b></div>
+              <div class="editor-toolbar focus-canvas-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Protecting sensitive values' : 'Focus editor'}</strong><small>{editorResource.kind === 'Secret' ? 'Choose a key on the left, then reveal or edit its value.' : 'Choose a key on the left to give its value room to breathe.'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
+              <div class="focus-canvas-shell">
+                {#if editorEntries.length === 0}
+                  <div class="drawer-state focus-canvas-empty">This {editorResource!.kind} has no data entries.<button class="focus-canvas-empty-action" on:click={addEditorEntry}>＋ Add key</button></div>
+                {:else}
+                  <nav class="focus-canvas-rail" aria-label={`${editorResource.kind} keys`}>
+                    <div class="focus-canvas-rail-heading"><span>Keys</span><b>{editorEntries.length}</b></div>
+                    <div class="focus-canvas-key-list">{#each editorEntries as entry, index}<button type="button" class:focus-canvas-key-active={index === focusedEditorEntry} class="focus-canvas-key" on:click={() => (focusedEditorEntry = index)}><i></i><span>{entry.key || 'Unnamed key'}</span></button>{/each}</div>
+                    <button type="button" class="focus-canvas-add" on:click={addEditorEntry}><span>＋</span>Add key</button>
+                  </nav>
+                  {#if focusedEditorEntryData}
+                    <div class="focus-canvas-main">
+                      <div class="focus-canvas-main-heading"><div><span class="focus-canvas-entry-index">{String(focusedEditorEntry + 1).padStart(2, '0')}</span><div><strong>{focusedEditorEntryData.key || 'Unnamed key'}</strong><small>Focused entry · {editorResource.kind === 'Secret' ? (revealSecret ? 'decoded locally' : 'base64 protected') : 'plain text'}</small></div></div><button type="button" class="focus-canvas-remove" on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove</button></div>
+                      <label class="focus-canvas-field"><span>Key</span><input value={focusedEditorEntryData.key} on:input={(event) => updateEditorEntryKey(focusedEditorEntry, event.currentTarget.value)} /></label>
+                      <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
+                      <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
+                    </div>
+                  {/if}
+                {/if}
+              </div>
+            </section>
           {:else if !editorCertificate}
             <div class="drawer-state">This resource has no editable data view yet.</div>
           {/if}
