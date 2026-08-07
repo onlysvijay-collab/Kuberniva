@@ -1562,3 +1562,17 @@ main {
   box-shadow: 0 0 0 3px rgba(148,137,111,.11), 0 4px 10px rgba(74,74,70,.05);
 }
 .focus-canvas-hint { color: #85857f; }
+
+/* Keep the value editor anchored to the top at every viewport height.  A
+   stretched grid row used to absorb the extra height on large displays,
+   leaving the textarea and its content visually pinned near the bottom while
+   the same panel sat correctly on a 13-inch screen. */
+.focus-canvas-value-field {
+  grid-template-rows: auto minmax(165px, 1fr);
+  align-content: stretch;
+}
+.focus-canvas-value-field > span { align-self: start; }
+.focus-canvas-value-field textarea {
+  min-height: 165px;
+  height: 100%;
+}
