@@ -703,10 +703,6 @@
     );
   }
 
-  function updateEditorEntryKey(index: number, key: string) {
-    editorEntries = editorEntries.map((entry, entryIndex) => entryIndex === index ? { ...entry, key } : entry);
-  }
-
   function addEditorEntry() {
     const value = editorResource?.kind === 'Secret' && revealSecret ? encodeSecret('') : '';
     editorEntries = [...editorEntries, { key: 'new-key', value }];
@@ -2018,12 +2014,10 @@
                             <nav class="focus-canvas-rail" aria-label={`${editorResource.kind} keys`}>
                               <div class="focus-canvas-rail-heading"><span>Keys</span><b>{editorEntries.length}</b></div>
                               <div class="focus-canvas-key-list">{#each editorEntries as entry, index}<button type="button" class:focus-canvas-key-active={index === focusedEditorEntry} class="focus-canvas-key" on:click={() => (focusedEditorEntry = index)}><i></i><span>{entry.key || 'Unnamed key'}</span></button>{/each}</div>
-                              <button type="button" class="focus-canvas-add" on:click={addEditorEntry}><span>＋</span>Add key</button>
+                              <div class="focus-canvas-rail-actions"><button type="button" class="focus-canvas-remove focus-canvas-remove-rail" on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove selected</button><button type="button" class="focus-canvas-add" on:click={addEditorEntry}><span>＋</span>Add key</button></div>
                             </nav>
                             {#if focusedEditorEntryData}
                               <div class="focus-canvas-main">
-                                <div class="focus-canvas-main-heading"><div><span class="focus-canvas-entry-index">{String(focusedEditorEntry + 1).padStart(2, '0')}</span><div><strong>{focusedEditorEntryData.key || 'Unnamed key'}</strong><small>Focused entry · {editorResource.kind === 'Secret' ? (revealSecret ? 'decoded locally' : 'base64 protected') : 'plain text'}</small></div></div><button type="button" class="focus-canvas-remove" on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove</button></div>
-                                <label class="focus-canvas-field"><span>Key</span><input value={focusedEditorEntryData.key} on:input={(event) => updateEditorEntryKey(focusedEditorEntry, event.currentTarget.value)} /></label>
                                 <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
                                 <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
                               </div>
@@ -2259,12 +2253,10 @@
                   <nav class="focus-canvas-rail" aria-label={`${editorResource.kind} keys`}>
                     <div class="focus-canvas-rail-heading"><span>Keys</span><b>{editorEntries.length}</b></div>
                     <div class="focus-canvas-key-list">{#each editorEntries as entry, index}<button type="button" class:focus-canvas-key-active={index === focusedEditorEntry} class="focus-canvas-key" on:click={() => (focusedEditorEntry = index)}><i></i><span>{entry.key || 'Unnamed key'}</span></button>{/each}</div>
-                    <button type="button" class="focus-canvas-add" on:click={addEditorEntry}><span>＋</span>Add key</button>
+                    <div class="focus-canvas-rail-actions"><button type="button" class="focus-canvas-remove focus-canvas-remove-rail" on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove selected</button><button type="button" class="focus-canvas-add" on:click={addEditorEntry}><span>＋</span>Add key</button></div>
                   </nav>
                   {#if focusedEditorEntryData}
                     <div class="focus-canvas-main">
-                      <div class="focus-canvas-main-heading"><div><span class="focus-canvas-entry-index">{String(focusedEditorEntry + 1).padStart(2, '0')}</span><div><strong>{focusedEditorEntryData.key || 'Unnamed key'}</strong><small>Focused entry · {editorResource.kind === 'Secret' ? (revealSecret ? 'decoded locally' : 'base64 protected') : 'plain text'}</small></div></div><button type="button" class="focus-canvas-remove" on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove</button></div>
-                      <label class="focus-canvas-field"><span>Key</span><input value={focusedEditorEntryData.key} on:input={(event) => updateEditorEntryKey(focusedEditorEntry, event.currentTarget.value)} /></label>
                       <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
                       <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
                     </div>

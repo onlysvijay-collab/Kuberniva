@@ -1320,6 +1320,17 @@ main {
   border-color: #bf9c56;
   background: #fff0c8;
 }
+.focus-canvas-rail-actions {
+  display: grid;
+  gap: 7px;
+  margin-top: auto;
+}
+.focus-canvas-rail-actions .focus-canvas-add { margin-top: 0; }
+.focus-canvas-remove-rail {
+  width: 100%;
+  margin-top: 0;
+  text-align: center;
+}
 .focus-canvas-main {
   min-width: 0;
   min-height: 0;
@@ -1435,7 +1446,119 @@ main {
   .focus-canvas-rail { max-height: 176px; border-right: 0; border-bottom: 1px solid #eee5d4; }
   .focus-canvas-key-list { display: flex; gap: 5px; overflow-x: auto; overflow-y: hidden; }
   .focus-canvas-key { width: auto; min-width: 112px; margin-bottom: 0; }
-  .focus-canvas-add { margin-top: 8px; }
+  .focus-canvas-rail-actions { margin-top: 8px; }
+  .focus-canvas-add { margin-top: 0; }
   .focus-canvas-main { padding: 14px; }
   .focus-canvas-field textarea { min-height: 125px; }
 }
+
+/* Keep the warmth very subtle: ivory-white surfaces should lead, with gold
+   reserved for small affordances and the active key state. */
+.configuration-inspector,
+.resource-editor {
+  border-color: #ebe8e0;
+  background: linear-gradient(145deg, #fff 0%, #fffdf9 58%, #fffefa 100%);
+  box-shadow: 0 12px 28px rgba(74, 74, 70, .06), inset 0 1px rgba(255,255,255,.96);
+}
+.configuration-data-heading {
+  border-bottom-color: #eeeae3;
+  background: linear-gradient(135deg, rgba(255,255,255,.96), rgba(255,253,249,.9));
+}
+.configuration-data-heading > div > span {
+  border-color: #e7e2d6;
+  color: #927d52;
+  background: linear-gradient(145deg, #faf8f1, #fffdf9);
+  box-shadow: 0 4px 10px rgba(82,78,67,.08);
+}
+.configuration-data-heading strong { color: #4b4b48; }
+.configuration-data-heading small { color: #85857f; }
+.configuration-data-heading > b {
+  border-color: #e7e0d1;
+  color: #887550;
+  background: #fbf8f0;
+}
+.configuration-inspector .editor-toolbar,
+.resource-editor .editor-toolbar {
+  border-color: #ece9e2;
+  background: rgba(255,255,255,.88);
+  box-shadow: 0 3px 10px rgba(74,74,70,.035);
+}
+.configuration-inspector .editor-toolbar strong,
+.resource-editor .editor-toolbar strong { color: #51514d; }
+.configuration-inspector .editor-toolbar small,
+.resource-editor .editor-toolbar small { color: #85857f; }
+.configuration-inspector .editor-entry,
+.resource-editor .editor-entry {
+  border-color: #ebe8e1;
+  background: linear-gradient(135deg, #fff 0%, #fffefa 72%, #fffdf9 100%);
+  box-shadow: 0 4px 12px rgba(74,74,70,.04);
+}
+.configuration-inspector .editor-entry:hover,
+.resource-editor .editor-entry:hover {
+  border-color: #ddd8cb;
+  box-shadow: 0 8px 18px rgba(74,74,70,.07);
+}
+.focus-canvas-editor .reveal-button {
+  border-color: #e4ded1;
+  color: #75684f;
+  background: #fbf9f3;
+}
+.focus-canvas-editor .reveal-button:hover {
+  border-color: #d6cfbf;
+  background: #f7f4ec;
+}
+.focus-canvas-shell {
+  border-color: #ebe8e1;
+  background: #fff;
+  box-shadow: inset 0 1px rgba(255,255,255,.9);
+}
+.focus-canvas-rail {
+  border-right-color: #eeeae3;
+  background: linear-gradient(180deg, #fffefa, #fcfbf8);
+}
+.focus-canvas-rail-heading { color: #88847a; }
+.focus-canvas-rail-heading b {
+  border-color: #e5e1d7;
+  color: #81745d;
+  background: #faf8f2;
+}
+.focus-canvas-key-list { scrollbar-color: #d5d1c6 transparent; }
+.focus-canvas-key-list::-webkit-scrollbar-thumb { background: #d5d1c6; background-clip: padding-box; }
+.focus-canvas-key { color: #7c8184; }
+.focus-canvas-key i { background: #c6c2b6; }
+.focus-canvas-key:hover { color: #6c665a; background: #faf8f2; }
+.focus-canvas-key-active {
+  border-color: #e1dacb;
+  color: #70634e;
+  background: #f7f4ec;
+}
+.focus-canvas-key-active i {
+  background: #9b865b;
+  box-shadow: 0 0 0 3px rgba(155,134,91,.11);
+}
+.focus-canvas-add,
+.focus-canvas-empty-action {
+  border-color: #ded9ce;
+  color: #786c57;
+  background: #fbfaf6;
+}
+.focus-canvas-add:hover,
+.focus-canvas-empty-action:hover {
+  border-color: #cfc8ba;
+  background: #f6f3eb;
+}
+.focus-canvas-main { background: linear-gradient(135deg, #fff, #fffefa 72%, #fcfbf8); }
+.focus-canvas-field,
+.focus-canvas-field > span { color: #7f7e78; }
+.focus-canvas-field input,
+.focus-canvas-field textarea {
+  border-color: #e2e0da;
+  color: #4d5660;
+  background: #fff;
+}
+.focus-canvas-field input:focus,
+.focus-canvas-field textarea:focus {
+  border-color: #c6c0b2;
+  box-shadow: 0 0 0 3px rgba(148,137,111,.11), 0 4px 10px rgba(74,74,70,.05);
+}
+.focus-canvas-hint { color: #85857f; }
