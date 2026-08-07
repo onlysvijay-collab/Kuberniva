@@ -97,6 +97,20 @@ struct ResourceObject {
     name: String,
     namespace: Option<String>,
     created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ready_containers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_containers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restarts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_usage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_usage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -694,6 +708,138 @@ fn usage_percent(usage: Option<&str>, capacity: Option<&str>, cpu: bool) -> Opti
     let usage = quantity_as_number(usage?, cpu)?;
     let capacity = quantity_as_number(capacity?, cpu)?;
     (capacity > 0.0).then(|| (usage / capacity * 100.0).clamp(0.0, 100.0))
+}
+
+fn format_cpu_usage(cores: f64) -> String {
+    if cores >= 1.0 {
+        format!("{cores:.2} cores")
+    } else {
+        format!("{}m", (cores * 1_000.0).round() as i64)
+    }
+}
+
+fn format_memory_usage(bytes: f64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    if bytes >= GIB {
+        format!("{:.1}Gi", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.0}Mi", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.0}Ki", bytes / KIB)
+    } else {
+        format!("{}B", bytes.max(0.0).round() as i64)
+    }
+}
+
+async fn pod_usage_map(
+    client: Client,
+    namespace: Option<&str>,
+) -> HashMap<(String, String), (String, String)> {
+    let resource = ApiResource {
+        group: "metrics.k8s.io".to_string(),
+        version: "v1beta1".to_string(),
+        api_version: "metrics.k8s.io/v1beta1".to_string(),
+        kind: "PodMetrics".to_string(),
+        plural: "pods".to_string(),
+    };
+    let api = match namespace.filter(|value| *value != "all namespaces") {
+        Some(namespace) => Api::<DynamicObject>::namespaced_with(client, namespace, &resource),
+        None => Api::<DynamicObject>::all_with(client, &resource),
+    };
+    let response = match api.list(&ListParams::default()).await {
+        Ok(response) => response,
+        Err(_) => return HashMap::new(),
+    };
+    response
+        .items
+        .into_iter()
+        .filter_map(|metric| {
+            let name = metric.metadata.name?;
+            let namespace = metric.metadata.namespace.unwrap_or_default();
+            let containers = metric.data.get("containers")?.as_array()?;
+            let mut cpu_values = Vec::new();
+            let mut memory_values = Vec::new();
+            for container in containers {
+                let usage = container.get("usage").and_then(Value::as_object);
+                if let Some(cpu) = usage
+                    .and_then(|usage| usage.get("cpu"))
+                    .and_then(Value::as_str)
+                    .and_then(|value| quantity_as_number(value, true))
+                {
+                    cpu_values.push(cpu);
+                }
+                if let Some(memory) = usage
+                    .and_then(|usage| usage.get("memory"))
+                    .and_then(Value::as_str)
+                    .and_then(|value| quantity_as_number(value, false))
+                {
+                    memory_values.push(memory);
+                }
+            }
+            if cpu_values.is_empty() && memory_values.is_empty() {
+                return None;
+            }
+            let cpu = if cpu_values.is_empty() {
+                String::new()
+            } else {
+                format_cpu_usage(cpu_values.into_iter().sum())
+            };
+            let memory = if memory_values.is_empty() {
+                String::new()
+            } else {
+                format_memory_usage(memory_values.into_iter().sum())
+            };
+            Some(((namespace, name), (cpu, memory)))
+        })
+        .collect()
+}
+
+fn pod_resource_object(
+    pod: Pod,
+    usage: Option<&(String, String)>,
+) -> ResourceObject {
+    let name = pod.metadata.name.unwrap_or_default();
+    let namespace = pod.metadata.namespace;
+    let created_at = pod
+        .metadata
+        .creation_timestamp
+        .map(|timestamp| timestamp.0.to_string());
+    let total_containers = pod
+        .spec
+        .as_ref()
+        .map(|spec| spec.containers.len() as u32);
+    let node_name = pod.spec.as_ref().and_then(|spec| spec.node_name.clone());
+    let (ready_containers, restarts) = pod
+        .status
+        .as_ref()
+        .and_then(|status| status.container_statuses.as_ref())
+        .map(|statuses| {
+            (
+                statuses.iter().filter(|status| status.ready).count() as u32,
+                statuses
+                    .iter()
+                    .map(|status| status.restart_count.max(0) as u32)
+                    .sum::<u32>(),
+            )
+        })
+        .unwrap_or((0, 0));
+    ResourceObject {
+        name,
+        namespace,
+        created_at,
+        status: pod
+            .status
+            .as_ref()
+            .and_then(|status| status.phase.clone()),
+        ready_containers: total_containers.map(|_| ready_containers),
+        total_containers,
+        restarts: total_containers.map(|_| restarts),
+        cpu_usage: usage.map(|usage| usage.0.clone()).filter(|value| !value.is_empty()),
+        memory_usage: usage.map(|usage| usage.1.clone()).filter(|value| !value.is_empty()),
+        node_name,
+    }
 }
 
 fn configure_desktop_exec_path() {
@@ -1296,6 +1442,39 @@ async fn read_cluster_events(
 #[tauri::command]
 async fn list_resource_objects(request: ResourceRequest) -> Result<Vec<ResourceObject>, String> {
     let client = client_for(request.kubeconfig_path, request.context).await?;
+    if request.kind == "Pod" {
+        let namespace = request
+            .namespace
+            .as_deref()
+            .filter(|value| *value != "all namespaces");
+        let pods_api = match namespace {
+            Some(namespace) => Api::<Pod>::namespaced(client.clone(), namespace),
+            None => Api::<Pod>::all(client.clone()),
+        };
+        let list_params = ListParams::default();
+        let (usage, pods_result) = tokio::join!(
+            pod_usage_map(client, namespace),
+            pods_api.list(&list_params),
+        );
+        let mut pods = pods_result
+            .map_err(|error| error.to_string())?
+            .items
+            .into_iter()
+            .map(|pod| {
+                let key = (
+                    pod.metadata.namespace.clone().unwrap_or_default(),
+                    pod.metadata.name.clone().unwrap_or_default(),
+                );
+                pod_resource_object(pod, usage.get(&key))
+            })
+            .collect::<Vec<_>>();
+        pods.sort_by(|left, right| {
+            left.namespace
+                .cmp(&right.namespace)
+                .then(left.name.cmp(&right.name))
+        });
+        return Ok(pods);
+    }
     let api_version = if request.group.is_empty() {
         request.version.clone()
     } else {
@@ -1331,6 +1510,13 @@ async fn list_resource_objects(request: ResourceRequest) -> Result<Vec<ResourceO
                 .metadata
                 .creation_timestamp
                 .map(|timestamp| timestamp.0.to_string()),
+            status: None,
+            ready_containers: None,
+            total_containers: None,
+            restarts: None,
+            cpu_usage: None,
+            memory_usage: None,
+            node_name: None,
         })
         .collect::<Vec<_>>();
     objects.sort_by(|left, right| {
@@ -1454,21 +1640,23 @@ async fn list_workload_pods(request: WorkloadPodRequest) -> Result<Vec<ResourceO
             .map_err(|error| error.to_string())?;
     let selector = workload_label_selector(&workload.data)?;
 
-    let mut pods = Api::<Pod>::namespaced(client, &request.namespace)
-        .list(&ListParams::default().labels(&selector))
-        .await
+    let pods_api = Api::<Pod>::namespaced(client.clone(), &request.namespace);
+    let list_params = ListParams::default().labels(&selector);
+    let (usage, pods_result) = tokio::join!(
+        pod_usage_map(client, Some(&request.namespace)),
+        pods_api.list(&list_params),
+    );
+    let mut pods = pods_result
         .map_err(|error| error.to_string())?
         .items
         .into_iter()
         .filter_map(|pod| {
-            pod.metadata.name.map(|name| ResourceObject {
-                name,
-                namespace: pod.metadata.namespace,
-                created_at: pod
-                    .metadata
-                    .creation_timestamp
-                    .map(|timestamp| timestamp.0.to_string()),
-            })
+            pod.metadata.name.as_ref()?;
+            let key = (
+                pod.metadata.namespace.clone().unwrap_or_default(),
+                pod.metadata.name.clone().unwrap_or_default(),
+            );
+            Some(pod_resource_object(pod, usage.get(&key)))
         })
         .collect::<Vec<_>>();
     pods.sort_by(|left, right| left.name.cmp(&right.name));

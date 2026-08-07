@@ -1,12 +1,23 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { Activity, Bell, Boxes, ChevronRight, CircleDot, Command, Container, Database, FileSearch, LayoutDashboard, Menu, RefreshCw, Search, ScrollText, Settings2, SlidersHorizontal, Star, Workflow } from '@lucide/svelte';
+  import { Activity, Bell, Boxes, ChevronRight, Command, Container, Database, FileSearch, LayoutDashboard, Menu, RefreshCw, Search, ScrollText, Settings2, SlidersHorizontal, Star, Workflow } from '@lucide/svelte';
 
   type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Settings';
   type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Storage' | 'Cluster' | 'Custom Resources';
   type ResourceDescriptor = { group: string; version: string; apiVersion: string; kind: string; plural: string; namespaced: boolean; category: ResourceCategory; custom: boolean; crd: boolean };
   type ClusterCatalog = { context: string; namespaces: string[]; resources: ResourceDescriptor[] };
-  type ResourceObject = { name: string; namespace?: string; createdAt?: string };
+  type ResourceObject = {
+    name: string;
+    namespace?: string;
+    createdAt?: string;
+    status?: string;
+    readyContainers?: number;
+    totalContainers?: number;
+    restarts?: number;
+    cpuUsage?: string;
+    memoryUsage?: string;
+    nodeName?: string;
+  };
   type PodPort = { container: string; name?: string; port: number; protocol: string };
   type PodLogResponse = { lines: string[]; containers: string[]; selectedContainer?: string; ports: PodPort[] };
   type PodRuntime = { containers: string[]; ports: PodPort[] };
@@ -172,6 +183,59 @@
   );
   $: suggestedForwardPorts = [...new Set(logPorts.map((port) => port.port))];
   $: focusedEditorEntryData = editorEntries[focusedEditorEntry] || null;
+
+  function autoSizeTextarea(node: HTMLTextAreaElement, _value: string) {
+    const resize = () => {
+      node.style.height = 'auto';
+      const maxHeight = Math.min(560, Math.max(180, Math.round(window.innerHeight * 0.56)));
+      const desiredHeight = Math.max(44, node.scrollHeight);
+      node.style.height = `${Math.min(desiredHeight, maxHeight)}px`;
+      node.style.overflowY = desiredHeight > maxHeight ? 'auto' : 'hidden';
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    return {
+      update: resize,
+      destroy: () => window.removeEventListener('resize', resize),
+    };
+  }
+
+  function resourceAge(createdAt?: string) {
+    if (!createdAt) return '—';
+    const timestamp = Date.parse(createdAt);
+    if (!Number.isFinite(timestamp)) return '—';
+    const elapsed = Math.max(0, Date.now() - timestamp);
+    const minutes = Math.floor(elapsed / 60_000);
+    if (minutes < 1) return 'now';
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days}d`;
+    const months = Math.floor(days / 30);
+    if (months < 12) return `${months}mo`;
+    return `${Math.floor(months / 12)}y`;
+  }
+
+  function workloadStatusLabel(object: ResourceObject) {
+    return object.status || 'Live';
+  }
+
+  function workloadStatusTone(object: ResourceObject) {
+    const status = (object.status || 'live').toLowerCase();
+    if (status === 'running' || status === 'succeeded' || status === 'live') return 'running';
+    if (status === 'pending' || status === 'unknown') return 'pending';
+    return 'failed';
+  }
+
+  function podContainerSummary(object: ResourceObject) {
+    if (object.totalContainers === undefined) return '—';
+    return `${object.readyContainers ?? 0}/${object.totalContainers}`;
+  }
+
+  function podMetricLabel(value?: string) {
+    return value || '—';
+  }
 
   function notify(message: string) {
     toast = message;
@@ -669,6 +733,12 @@
 
   function selectWorkloadResource(resource: ResourceDescriptor) {
     workloadSearch = '';
+    // A resource-type switch starts a fresh workload workspace. Do not leave a
+    // Pod/deployment inspector or terminal attached to the previous type.
+    closeEditor();
+    closeYamlEditor();
+    relatedPods = null;
+    relatedObject = null;
     void loadWorkloadResource(resource);
   }
 
@@ -2018,7 +2088,7 @@
                             </nav>
                             {#if focusedEditorEntryData}
                               <div class="focus-canvas-main">
-                                <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
+                                <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea use:autoSizeTextarea={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
                                 <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
                               </div>
                             {/if}
@@ -2079,13 +2149,25 @@
             <div class:workload-detail-open={editorResource?.category === 'Workloads' && editorObject !== null} class="workload-grid grid min-h-[560px] grid-cols-[230px_minmax(0,1fr)] gap-5">
               <aside class="rounded-2xl border border-white/10 bg-[#151924]/90 p-3 shadow-2xl shadow-black/10"><div class="border-b border-white/10 px-2 pb-3"><p class="m-0 text-sm font-semibold text-white">Resource types</p><p class="mb-0 mt-1 text-xs text-slate-400">Demand-loaded per type</p></div><div class="mt-2 space-y-1">{#if workloadResources.length}{#each workloadResources as resource}<button class={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2.5 text-left text-sm font-medium transition hover:bg-white/[0.06] ${workloadResource?.kind === resource.kind ? 'bg-indigo-500/15 text-indigo-200 ring-1 ring-inset ring-indigo-400/20' : 'text-slate-400'}`} on:click={() => selectWorkloadResource(resource)}><Boxes size={16} class={workloadResource?.kind === resource.kind ? 'text-cyan-300' : 'text-slate-500'} /><span class="min-w-0 flex-1 truncate">{resource.kind}</span>{#if workloadResource?.kind === resource.kind}<span class="rounded-md bg-black/20 px-1.5 py-0.5 font-mono text-[10px] text-indigo-200">{workloadObjects.length}</span>{/if}</button>{/each}{:else}<p class="px-2 py-4 text-xs leading-5 text-slate-500">No workload APIs were discovered.</p>{/if}</div></aside>
 
-              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}</p></div><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
+              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
                 {#if loadingWorkloads}
                   <div class="grid min-h-96 place-items-center text-sm text-slate-400"><div class="flex items-center gap-3"><RefreshCw size={18} class="animate-spin text-cyan-300" />Loading {workloadResource?.plural || 'workloads'}…</div></div>
                 {:else if visibleWorkloadObjects.length === 0}
                   <div class="grid min-h-96 place-items-center px-6 text-center"><div><div class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-indigo-500/15 text-cyan-300"><Boxes size={22} /></div><h4 class="mb-0 mt-4 text-base font-semibold text-slate-100">{workloadObjects.length ? 'No matching workloads' : `No ${workloadResource?.plural || 'workloads'} found`}</h4><p class="mb-0 mt-2 text-sm text-slate-400">{workloadObjects.length ? 'Try a different name or namespace filter.' : `Nothing was returned for ${namespace}.`}</p></div></div>
                 {:else}
-                  <div class="grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-3 p-5">{#each visibleWorkloadObjects as workload}<button class="group min-h-40 rounded-xl border border-white/10 bg-white/[0.025] p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-indigo-400/50 hover:bg-indigo-400/[0.06] hover:shadow-lg hover:shadow-black/20" on:click={() => workloadResource && openObject(workloadResource, workload)}><div class="flex items-start justify-between gap-3"><span class="grid h-9 w-9 place-items-center rounded-lg bg-indigo-500/15 text-cyan-300"><Container size={18} /></span><ChevronRight size={18} class="text-slate-600 transition group-hover:translate-x-0.5 group-hover:text-cyan-300" /></div><h4 class="mt-5 truncate text-sm font-semibold text-white">{workload.name}</h4><p class="mt-1 truncate font-mono text-[11px] text-slate-400">{workload.namespace || 'cluster scope'}</p><div class="mt-5 flex items-center justify-between border-t border-white/10 pt-3 text-xs"><span class="inline-flex items-center gap-1.5 text-slate-400"><CircleDot size={12} class="text-cyan-300" />Live object</span><span class="font-semibold text-indigo-200">Open</span></div></button>{/each}</div>
+                  <div class="workload-object-list" aria-label={`${workloadResource?.kind || 'Workload'} list`}>
+                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-hidden="true"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Containers</span><span>CPU used</span><span>Memory used</span>{/if}<span>Age</span><span></span></div>
+                    {#each visibleWorkloadObjects as workload}
+                      <button class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-row group" on:click={() => workloadResource && openObject(workloadResource, workload)}>
+                        <span class={`workload-status-dot ${workloadStatusTone(workload)}`}></span>
+                        <div class="workload-object-name"><strong>{workload.name}</strong><small>{workload.namespace || 'cluster scope'}{#if workload.nodeName} · {workload.nodeName}{/if}</small></div>
+                        <div class="workload-row-fact"><b class={`workload-status-label ${workloadStatusTone(workload)}`}>{workloadStatusLabel(workload)}</b></div>
+                        {#if workloadResource?.kind === 'Pod'}<div class="workload-row-fact"><b>{podContainerSummary(workload)}{#if workload.restarts !== undefined && workload.restarts > 0}<small> · {workload.restarts} restarts</small>{/if}</b></div><div class="workload-row-fact"><b title={workload.cpuUsage || 'Metrics unavailable'}>{podMetricLabel(workload.cpuUsage)}</b></div><div class="workload-row-fact"><b title={workload.memoryUsage || 'Metrics unavailable'}>{podMetricLabel(workload.memoryUsage)}</b></div>{/if}
+                        <div class="workload-row-fact workload-row-age"><b>{resourceAge(workload.createdAt)}</b></div>
+                        <ChevronRight size={17} class="workload-row-arrow" />
+                      </button>
+                    {/each}
+                  </div>
                 {/if}
               </div>
               {#if editorResource && editorObject && editorResource.category === 'Workloads'}
@@ -2110,6 +2192,7 @@
                     <div class="workload-inspector-body">
                       <section class="workload-action-grid"><button class:workload-action-loading={openingWorkloadLogs} class="workload-action-card workload-logs-action" disabled={openingWorkloadLogs} aria-busy={openingWorkloadLogs} on:click={() => openWorkloadLogs(editorResource!, editorObject!)}><span>{#if openingWorkloadLogs}<RefreshCw size={18} class="workload-action-spinner" />{:else}≡{/if}</span><div><strong>{openingWorkloadLogs ? 'Opening logs…' : 'View logs'}</strong><small>{openingWorkloadLogs ? 'Finding live Pods and preparing the stream' : 'Choose a live Pod and stream its output'}</small></div><b>{openingWorkloadLogs ? '•••' : '→'}</b></button><button class="workload-action-card workload-terminal-action" disabled={loadingTerminalPods} on:click={() => openWorkloadTerminal(editorResource!, editorObject!)}><span>⌘</span><div><strong>Terminal</strong><small>Tunnel into a Pod container with Kubernetes exec</small></div><b>→</b></button></section>
                       <section class="workload-status-grid"><div><span>Replicas</span><strong>{workloadReplicaSummary(editorManifest)}</strong></div><div><span>API</span><strong>{editorResource.apiVersion}</strong></div></section>
+                      {#if editorResource.kind === 'Pod'}<section class="workload-pod-facts"><div><span>Phase</span><strong class={`workload-status-label ${workloadStatusTone(editorObject)}`}>{workloadStatusLabel(editorObject)}</strong></div><div><span>Containers</span><strong>{podContainerSummary(editorObject)}</strong></div><div><span>Restarts</span><strong>{editorObject.restarts ?? 0}</strong></div><div><span>Age</span><strong>{resourceAge(editorObject.createdAt)}</strong></div>{#if editorObject.cpuUsage}<div><span>CPU used</span><strong>{editorObject.cpuUsage}</strong></div>{/if}{#if editorObject.memoryUsage}<div><span>Memory used</span><strong>{editorObject.memoryUsage}</strong></div>{/if}{#if editorObject.nodeName}<div class="workload-pod-fact-wide"><span>Node</span><strong>{editorObject.nodeName}</strong></div>{/if}</section>{/if}
                       <section class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>Container images</strong><small>Images declared on the Pod template</small></div><b>{workloadImages(editorManifest).length}</b></div>{#if workloadImages(editorManifest).length}<div class="workload-image-list">{#each workloadImages(editorManifest) as container}<div><span>{container.init ? 'Init' : 'App'}</span><strong>{container.name}</strong><small title={container.image}>{container.image}</small></div>{/each}</div>{:else}<p>No container image is declared on this resource.</p>{/if}</section>
                       <section class="workload-attachment-grid"><div class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>ConfigMaps</strong><small>Environment and volume references</small></div><b>{workloadAttachments(editorManifest).configMaps.length}</b></div>{#if workloadAttachments(editorManifest).configMaps.length}<div class="workload-reference-list">{#each workloadAttachments(editorManifest).configMaps as configMap}<span>◇ {configMap}</span>{/each}</div>{:else}<p>No ConfigMap is attached.</p>{/if}</div><div class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>Secrets</strong><small>Environment, pull, and volume references</small></div><b>{workloadAttachments(editorManifest).secrets.length}</b></div>{#if workloadAttachments(editorManifest).secrets.length}<div class="workload-reference-list secret-reference-list">{#each workloadAttachments(editorManifest).secrets as secret}<span>◈ {secret}</span>{/each}</div>{:else}<p>No Secret is attached.</p>{/if}</div></section>
                       {#if resourceLabels(editorManifest).length}<section class="resource-labels workload-labels"><strong>Labels</strong><div class="inspector-chip-list">{#each resourceLabels(editorManifest) as [key, value]}<span><b>{key}</b>{value}</span>{/each}</div></section>{/if}
@@ -2257,7 +2340,7 @@
                   </nav>
                   {#if focusedEditorEntryData}
                     <div class="focus-canvas-main">
-                      <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
+                      <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea use:autoSizeTextarea={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
                       <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
                     </div>
                   {/if}

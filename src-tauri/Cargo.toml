@@ -1,6 +1,6 @@
 [package]
 name = "kuberniva"
-version = "0.2.10"
+version = "0.2.11"
 description = "A focused Kubernetes control surface"
 authors = ["Kuberniva"]
 license = ""

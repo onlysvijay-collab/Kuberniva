@@ -1568,11 +1568,175 @@ main {
    leaving the textarea and its content visually pinned near the bottom while
    the same panel sat correctly on a 13-inch screen. */
 .focus-canvas-value-field {
-  grid-template-rows: auto minmax(165px, 1fr);
-  align-content: stretch;
+  grid-template-rows: auto auto;
+  align-content: start;
+  flex: 0 1 auto;
 }
 .focus-canvas-value-field > span { align-self: start; }
 .focus-canvas-value-field textarea {
-  min-height: 165px;
-  height: 100%;
+  min-height: 44px;
+  max-height: min(58vh, 560px);
+  flex: none;
+  resize: vertical;
+}
+
+/* Workloads use a compact, scan-friendly table for Pods and other workload
+   objects.  The list owns its scroll boundary so hundreds of Pods never push
+   the action pane off the window. */
+.workload-list-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workload-list-header { flex: 0 0 auto; }
+.workload-object-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 5px 9px 12px;
+  scrollbar-gutter: stable;
+}
+.workload-object-list-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: 9px minmax(140px, 1fr) minmax(64px, .58fr) minmax(76px, .65fr) minmax(64px, .58fr) minmax(78px, .68fr) 58px 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #e1e6ee;
+  color: #8490a1;
+  background: #f8fafd;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.workload-object-list-header:not(.workload-pod-row) {
+  grid-template-columns: 9px minmax(160px, 1fr) 92px 58px 16px;
+}
+.workload-object-row {
+  width: 100%;
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: 9px minmax(140px, 1fr) minmax(64px, .58fr) minmax(76px, .65fr) minmax(64px, .58fr) minmax(78px, .68fr) 58px 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border-bottom: 1px solid #e9edf2;
+  color: #59677b;
+  background: #fff;
+  text-align: left;
+  transition: background .13s ease, box-shadow .13s ease;
+}
+.workload-object-row:not(.workload-pod-row) {
+  grid-template-columns: 9px minmax(170px, 1.8fr) minmax(92px, .72fr) minmax(82px, .58fr) 18px;
+}
+.workload-object-row:hover {
+  background: #fafbff;
+  box-shadow: inset 2px 0 #8b80e8;
+}
+.workload-object-row:last-child { border-bottom: 0; }
+.workload-status-dot {
+  width: 8px;
+  height: 8px;
+  display: block;
+  border-radius: 50%;
+  background: #a8b2bf;
+  box-shadow: 0 0 0 3px rgba(168,178,191,.14);
+}
+.workload-status-dot.running { background: #42b878; box-shadow: 0 0 0 3px rgba(66,184,120,.14); }
+.workload-status-dot.pending { background: #d7a14b; box-shadow: 0 0 0 3px rgba(215,161,75,.15); }
+.workload-status-dot.failed { background: #d46872; box-shadow: 0 0 0 3px rgba(212,104,114,.14); }
+.workload-object-name,
+.workload-row-fact { min-width: 0; display: grid; gap: 4px; }
+.workload-object-name strong {
+  overflow: hidden;
+  color: #334057;
+  font-family: "DM Mono", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workload-object-name small,
+.workload-row-fact span {
+  overflow: hidden;
+  color: #8290a2;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workload-row-fact span {
+  color: #8b96a5;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.workload-row-fact b {
+  overflow: hidden;
+  color: #536176;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workload-row-fact b small { color: #9aa4b2; font-family: inherit; font-size: 8px; font-weight: 500; }
+.workload-status-label.running { color: #2f8b5a; }
+.workload-status-label.pending { color: #a2762c; }
+.workload-status-label.failed { color: #b94e5b; }
+.workload-row-age b { color: #69778c; }
+.workload-row-arrow { color: #9aa5b5; transition: color .13s ease, transform .13s ease; }
+.workload-object-row:hover .workload-row-arrow { color: #655ad2; transform: translateX(2px); }
+.workload-pod-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 12px;
+}
+.workload-pod-facts > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid #e1e6ef;
+  border-radius: 9px;
+  background: #fbfcff;
+}
+.workload-pod-facts span {
+  color: #7d8a9d;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.workload-pod-facts strong {
+  overflow: hidden;
+  color: #445169;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workload-pod-facts .workload-status-label.running { color: #2f8b5a; }
+.workload-pod-facts .workload-status-label.pending { color: #a2762c; }
+.workload-pod-facts .workload-status-label.failed { color: #b94e5b; }
+.workload-pod-fact-wide { grid-column: 1 / -1; }
+
+@media (max-width: 1150px) {
+  .workload-object-row,
+  .workload-object-list-header { grid-template-columns: 9px minmax(120px, 1fr) 62px 72px 60px 72px 52px 18px; gap: 8px; }
+  .workload-object-row:not(.workload-pod-row),
+  .workload-object-list-header:not(.workload-pod-row) { grid-template-columns: 9px minmax(145px, 1fr) 82px 52px 18px; }
+}
+@media (max-width: 760px) {
+  .workload-object-row,
+  .workload-object-list-header { min-width: 570px; }
+  .workload-list-header { align-items: stretch; flex-direction: column; }
+  .workload-list-header label { width: 100%; }
 }
