@@ -744,6 +744,51 @@
     });
   }
 
+  function networkServiceType(manifest: Record<string, unknown> | null) {
+    return asString(asRecord(asRecord(manifest).spec).type) || 'ClusterIP';
+  }
+
+  function networkServiceClusterIp(manifest: Record<string, unknown> | null) {
+    const spec = asRecord(asRecord(manifest).spec);
+    const clusterIps = asArray(spec.clusterIPs)
+      .map(asString)
+      .filter((value): value is string => Boolean(value));
+    return clusterIps[0] || asString(spec.clusterIP) || 'Assigned by Kubernetes';
+  }
+
+  function networkServiceExternalEndpoints(manifest: Record<string, unknown> | null) {
+    const endpoints = new Set<string>();
+    const resource = asRecord(manifest);
+    const spec = asRecord(resource.spec);
+    const status = asRecord(resource.status);
+    const add = (value: unknown) => {
+      const endpoint = asString(value);
+      if (endpoint && endpoint.toLowerCase() !== '<none>') endpoints.add(endpoint);
+    };
+    asArray(spec.externalIPs).forEach(add);
+    add(spec.externalName);
+    asArray(asRecord(status.loadBalancer).ingress).forEach((entry) => {
+      add(asRecord(entry).ip);
+      add(asRecord(entry).hostname);
+    });
+    return [...endpoints];
+  }
+
+  function networkServiceTrafficPolicy(manifest: Record<string, unknown> | null) {
+    const spec = asRecord(asRecord(manifest).spec);
+    return asString(spec.externalTrafficPolicy) || asString(spec.internalTrafficPolicy) || 'Cluster routing';
+  }
+
+  function networkServiceExposure(manifest: Record<string, unknown> | null) {
+    const type = networkServiceType(manifest);
+    const external = networkServiceExternalEndpoints(manifest);
+    if (external.length) return 'Reachable outside the cluster';
+    if (type === 'LoadBalancer') return 'Waiting for an external address';
+    if (type === 'NodePort') return 'Exposed through node ports';
+    if (type === 'ExternalName') return 'Routes to an external hostname';
+    return 'Internal cluster service';
+  }
+
   function genericResourcePreview(manifest: Record<string, unknown> | null) {
     const resource = asRecord(manifest);
     const preview = resource.spec || resource.status || {};
@@ -1947,13 +1992,26 @@
                       <section class="configuration-inspector">
                         <div class="configuration-data-heading"><div><span>{editorResource.kind === 'Secret' ? '◈' : '◇'}</span><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values loaded from this namespace'}</small></div></div><b>{editorEntries.length} {editorEntries.length === 1 ? 'entry' : 'entries'}</b></div>
                         <div class="editor-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Protecting sensitive values' : 'Editable key/value data'}</strong><small>{editorResource.kind === 'Secret' ? 'Reveal only when you need to inspect or change a value.' : 'Changes are saved with the current Kubernetes resource version.'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
-                        <div class="editor-entries">{#if editorEntries.length === 0}<div class="drawer-state">This {editorResource!.kind} has no data entries.</div>{:else}{#each editorEntries as entry, index}<div class="editor-entry"><label>Key<input value={entry.key} on:input={(event) => editorEntries = editorEntries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, key: event.currentTarget.value } : candidate)} /></label><label>Value<textarea value={editorResource!.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntry(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button aria-label={`Remove ${entry.key}`} on:click={() => (editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index))}>×</button></div>{/each}{/if}</div>
+                        <div class="editor-entries">{#if editorEntries.length === 0}<div class="drawer-state">This {editorResource!.kind} has no data entries.</div>{:else}{#each editorEntries as entry, index}<div class="editor-entry"><span class="editor-entry-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><label class="editor-field editor-key-field"><span>Key</span><input value={entry.key} on:input={(event) => editorEntries = editorEntries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, key: event.currentTarget.value } : candidate)} /></label><label class="editor-field editor-value-field"><span>Value</span><textarea value={editorResource!.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntry(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button class="editor-entry-remove" aria-label={`Remove ${entry.key}`} on:click={() => (editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index))}>×</button></div>{/each}{/if}</div>
                         <button class="add-entry" on:click={() => (editorEntries = [...editorEntries, { key: 'new-key', value: editorResource!.kind === 'Secret' && revealSecret ? encodeSecret('') : '' }])}>+ Add key</button>
                       </section>
                     {:else}
                       <div class="inspector-overview">
                         <section class="inspector-summary-grid"><div><span>Kind</span><strong>{editorResource.kind}</strong></div><div><span>Scope</span><strong>{editorObject.namespace || 'Cluster-wide'}</strong></div><div><span>API</span><strong>{editorResource.apiVersion}</strong></div></section>
                         {#if editorResource.category === 'Network'}
+                          {#if editorResource.kind === 'Service'}
+                            <section class="service-overview-card">
+                              <div class="service-overview-heading"><div><span class="service-overview-icon">⇄</span><div><strong>Service routing</strong><small>Exposure, address, and traffic policy</small></div></div><b class="service-type-badge">{networkServiceType(editorManifest)}</b></div>
+                              <div class="service-fact-grid"><div class="service-fact service-fact-type"><span>Service type</span><strong>{networkServiceType(editorManifest)}</strong><small>{networkServiceExposure(editorManifest)}</small></div><div class="service-fact"><span>Cluster IP</span><strong>{networkServiceClusterIp(editorManifest)}</strong><small>{networkPorts(editorManifest).length} declared {networkPorts(editorManifest).length === 1 ? 'port' : 'ports'}</small></div><div class="service-fact"><span>Traffic policy</span><strong>{networkServiceTrafficPolicy(editorManifest)}</strong><small>How traffic is routed</small></div></div>
+                              {#if networkServiceExternalEndpoints(editorManifest).length}
+                                <div class="service-external-card service-external-card-active"><span>↗</span><div><strong>External endpoint{networkServiceExternalEndpoints(editorManifest).length === 1 ? '' : 's'}</strong><small>Reachable outside the cluster</small><div class="service-endpoint-list">{#each networkServiceExternalEndpoints(editorManifest) as endpoint}<code>{endpoint}</code>{/each}</div></div></div>
+                              {:else if networkServiceType(editorManifest) === 'LoadBalancer'}
+                                <div class="service-external-card service-external-card-pending"><span>…</span><div><strong>External address pending</strong><small>The LoadBalancer has not received an IP or hostname yet.</small></div></div>
+                              {:else}
+                                <div class="service-external-card"><span>●</span><div><strong>No external endpoint</strong><small>This service is currently reachable only through cluster networking.</small></div></div>
+                              {/if}
+                            </section>
+                          {/if}
                           <section class="network-inspector-card"><div><strong>Hosts & addresses</strong><small>Resolved from this resource’s spec and status</small></div>{#if networkHosts(editorManifest).length}<div class="inspector-chip-list">{#each networkHosts(editorManifest) as host}<span>{host}</span>{/each}</div>{:else}<p>No host or address is declared on this resource.</p>{/if}</section>
                           <section class="network-inspector-card"><div><strong>Ports & listeners</strong><small>Service ports, target ports, or declared listeners</small></div>{#if networkPorts(editorManifest).length}<div class="inspector-chip-list">{#each networkPorts(editorManifest) as port}<span>{port}</span>{/each}</div>{:else}<p>No ports are declared on this resource.</p>{/if}</section>
                         {/if}
@@ -2156,7 +2214,7 @@
           {/if}
           {#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}
             <div class="editor-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
-            <div class="editor-entries">{#if editorEntries.length === 0}<div class="drawer-state">This {editorResource!.kind} has no data entries.</div>{:else}{#each editorEntries as entry, index}<div class="editor-entry"><label>Key<input value={entry.key} on:input={(event) => editorEntries = editorEntries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, key: event.currentTarget.value } : candidate)} /></label><label>Value<textarea value={editorResource!.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntry(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button aria-label={`Remove ${entry.key}`} on:click={() => (editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index))}>×</button></div>{/each}{/if}</div>
+            <div class="editor-entries">{#if editorEntries.length === 0}<div class="drawer-state">This {editorResource!.kind} has no data entries.</div>{:else}{#each editorEntries as entry, index}<div class="editor-entry"><span class="editor-entry-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><label class="editor-field editor-key-field"><span>Key</span><input value={entry.key} on:input={(event) => editorEntries = editorEntries.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, key: event.currentTarget.value } : candidate)} /></label><label class="editor-field editor-value-field"><span>Value</span><textarea value={editorResource!.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntry(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button class="editor-entry-remove" aria-label={`Remove ${entry.key}`} on:click={() => (editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index))}>×</button></div>{/each}{/if}</div>
             <button class="add-entry" on:click={() => (editorEntries = [...editorEntries, { key: 'new-key', value: editorResource!.kind === 'Secret' && revealSecret ? encodeSecret('') : '' }])}>+ Add key</button>
           {:else if !editorCertificate}
             <div class="drawer-state">This resource has no editable data view yet.</div>

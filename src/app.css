@@ -894,3 +894,200 @@ main {
     max-height: min(210px, 30vh);
   }
 }
+
+/* Configuration editor: turn each key/value pair into a deliberate data
+   card instead of a plain form row. */
+.configuration-inspector,
+.resource-editor {
+  border-color: #d9d4f4;
+  border-radius: 17px;
+  background: linear-gradient(145deg, #fbfaff 0%, #f3f1ff 52%, #f9fbff 100%);
+  box-shadow: 0 12px 28px rgba(78, 67, 145, .08), inset 0 1px rgba(255,255,255,.9);
+}
+.configuration-data-heading {
+  padding: 17px 18px 15px;
+  border-bottom-color: #e2def5;
+  background: linear-gradient(135deg, rgba(255,255,255,.88), rgba(245,243,255,.72));
+}
+.configuration-data-heading > div > span {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #d9d3f8;
+  border-radius: 11px;
+  color: #5b4dcc;
+  background: linear-gradient(145deg, #e5e1ff, #f3f1ff);
+  box-shadow: 0 4px 10px rgba(91, 77, 204, .12);
+}
+.configuration-data-heading strong { font-size: 14px; letter-spacing: -.15px; }
+.configuration-data-heading small { font-size: 10.5px; }
+.configuration-data-heading > b { padding: 5px 8px; border: 1px solid #d8d2f7; font-size: 10px; }
+.configuration-inspector .editor-toolbar,
+.resource-editor .editor-toolbar {
+  margin: 12px 12px 0;
+  padding: 13px 14px;
+  border: 1px solid #e0dcf1;
+  border-radius: 13px;
+  background: rgba(255,255,255,.78);
+  box-shadow: 0 3px 10px rgba(74, 63, 134, .04);
+}
+.configuration-inspector .editor-toolbar strong,
+.resource-editor .editor-toolbar strong { color: #3c4661; font-size: 13px; }
+.configuration-inspector .editor-toolbar small,
+.resource-editor .editor-toolbar small { color: #7c879b; font-size: 10.5px; line-height: 1.45; }
+.configuration-inspector .editor-entries,
+.resource-editor .editor-entries {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+  border: 0;
+  background: transparent;
+}
+.configuration-inspector .editor-entry,
+.resource-editor .editor-entry {
+  display: grid;
+  grid-template-columns: 34px minmax(120px, .72fr) minmax(0, 1.28fr) 34px;
+  gap: 12px;
+  align-items: stretch;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #dedaf0;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #fff 0%, #fcfbff 68%, #f7f9ff 100%);
+  box-shadow: 0 4px 12px rgba(72, 62, 129, .055);
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.configuration-inspector .editor-entry:hover,
+.resource-editor .editor-entry:hover {
+  border-color: #bdb4eb;
+  box-shadow: 0 8px 18px rgba(72, 62, 129, .10);
+  transform: translateY(-1px);
+}
+.editor-entry-number {
+  width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  align-self: start;
+  border: 1px solid #e0dbfa;
+  border-radius: 9px;
+  color: #786bd1;
+  background: #f2f0ff;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+.editor-field {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  color: #706b91;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.editor-field > span { color: #706b91; font-size: 10px; }
+.editor-field input,
+.editor-field textarea {
+  min-width: 0;
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 11px;
+  border: 1px solid #dcd8ec;
+  border-radius: 10px;
+  outline: 0;
+  color: #344059;
+  background: #fff;
+  box-shadow: inset 0 1px 2px rgba(66,55,129,.035);
+  font-size: 12px;
+  line-height: 1.5;
+  transition: border-color .14s ease, box-shadow .14s ease, background .14s ease;
+}
+.editor-field input { font-family: "DM Mono", monospace; font-weight: 600; }
+.editor-field textarea { min-height: 96px; resize: vertical; }
+.editor-field input:focus,
+.editor-field textarea:focus {
+  border-color: #9c91e8;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(117, 103, 222, .13), 0 3px 8px rgba(73, 61, 139, .06);
+}
+.editor-entry-remove {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  align-self: start;
+  border: 1px solid #efd4da;
+  border-radius: 9px;
+  color: #b95767;
+  background: #fff7f8;
+  font-size: 17px;
+  transition: border-color .14s ease, background .14s ease, color .14s ease;
+}
+.editor-entry-remove:hover { border-color: #e4aeb8; color: #a83e4e; background: #ffedf0; }
+.configuration-inspector .add-entry,
+.resource-editor .add-entry {
+  min-height: 42px;
+  margin: 0 12px 12px;
+  border: 1px dashed #bcb3ee;
+  border-radius: 11px;
+  color: #584ac4;
+  background: linear-gradient(90deg, #f1efff, #fbfaff);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .01em;
+}
+.configuration-inspector .add-entry:hover,
+.resource-editor .add-entry:hover { border-color: #9488df; background: #ece9ff; }
+
+/* Services deserve an operational summary before the generic network fields:
+   the exposure type and externally reachable address are the highest-signal
+   values when checking a LoadBalancer or NodePort. */
+.service-overview-card {
+  margin: 14px;
+  padding: 15px;
+  border: 1px solid #d3cef4;
+  border-radius: 16px;
+  background: linear-gradient(145deg, #f5f2ff 0%, #fff 55%, #f0fbfb 100%);
+  box-shadow: 0 8px 19px rgba(73, 63, 138, .075);
+}
+.service-overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.service-overview-heading > div { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.service-overview-icon { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid #c9c1f2; border-radius: 11px; color: #5a4dca; background: #ebe8ff; font-size: 19px; font-weight: 800; }
+.service-overview-heading strong { display: block; color: #35415b; font-size: 14px; }
+.service-overview-heading small { display: block; margin-top: 3px; color: #7e899d; font-size: 10px; }
+.service-type-badge { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #b9b0ef; border-radius: 999px; color: #5649c5; background: #ebe8ff; font-family: "DM Mono", monospace; font-size: 10px; font-weight: 700; }
+.service-fact-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }
+.service-fact { min-width: 0; display: grid; gap: 4px; padding: 10px; border: 1px solid #e2e4ee; border-radius: 10px; background: rgba(255,255,255,.78); }
+.service-fact span { color: #818ca0; font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.service-fact strong { overflow: hidden; color: #3e4b65; font-family: "DM Mono", monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.service-fact small { overflow: hidden; color: #8994a5; font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.service-fact-type { border-color: #d7d0f6; background: #faf9ff; }
+.service-fact-type strong { color: #574ac4; }
+.service-external-card { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 11px; border: 1px solid #dce5ed; border-radius: 11px; background: rgba(255,255,255,.82); }
+.service-external-card > span { width: 27px; height: 27px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; color: #5b6c81; background: #eef2f7; font-family: "DM Mono", monospace; font-size: 14px; font-weight: 800; }
+.service-external-card > div { min-width: 0; display: grid; gap: 3px; }
+.service-external-card strong { color: #47556b; font-size: 11px; }
+.service-external-card small { color: #8490a2; font-size: 9px; line-height: 1.4; }
+.service-external-card-active { border-color: #bfe6d4; background: linear-gradient(135deg, #f0fbf5, #fff); }
+.service-external-card-active > span { color: #2f9365; background: #ddf5e7; }
+.service-external-card-active strong { color: #2f7959; }
+.service-external-card-pending { border-color: #efd9aa; background: #fffaf0; }
+.service-external-card-pending > span { color: #a87224; background: #fff0c9; }
+.service-external-card-pending strong { color: #8d652d; }
+.service-endpoint-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.service-endpoint-list code { overflow-wrap: anywhere; padding: 4px 6px; border: 1px solid #c9e7d7; border-radius: 6px; color: #2c7e59; background: #eaf9f0; font-family: "DM Mono", monospace; font-size: 10px; }
+
+@media (max-width: 700px) {
+  .configuration-inspector .editor-entry,
+  .resource-editor .editor-entry {
+    grid-template-columns: 30px minmax(0, 1fr) 32px;
+  }
+  .editor-key-field { grid-column: 2; }
+  .editor-value-field { grid-column: 2 / -1; }
+  .editor-entry-remove { grid-column: 3; grid-row: 1; }
+  .service-fact-grid { grid-template-columns: 1fr; }
+}
