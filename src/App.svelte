@@ -33,6 +33,7 @@
   type NodeCondition = { type: string; status: string; reason?: string; message?: string; lastHeartbeatTime?: string; lastTransitionTime?: string };
   type NodeTaint = { key: string; value?: string; effect: string; timeAdded?: string };
   type NodeOverview = { name: string; ready: boolean; roles: string[]; labels: NodeProperty[]; annotations: NodeProperty[]; addresses: NodeAddress[]; conditions: NodeCondition[]; taints: NodeTaint[]; architecture?: string; operatingSystem?: string; osImage?: string; kernelVersion?: string; kubeletVersion?: string; containerRuntimeVersion?: string; podCidrs: string[]; providerId?: string; unschedulable: boolean; uid?: string; creationTimestamp?: string; capacity: NodeProperty[]; allocatable: NodeProperty[]; cpuCapacity?: string; memoryCapacity?: string; cpuUsage?: string; memoryUsage?: string; cpuUsagePercent?: number; memoryUsagePercent?: number };
+  type NetworkFact = { label: string; value: string; tone: 'neutral' | 'primary' | 'external' };
   type ClusterOverview = { nodes: NodeOverview[]; metricsAvailable: boolean; observedAt: string };
   type ClusterEvent = { name: string; namespace?: string; eventType: string; reason?: string; message?: string; involvedKind?: string; involvedName?: string; action?: string; count?: number; source?: string; firstObserved?: string; lastObserved?: string };
   type KubeContext = { name: string; cluster: string; namespace: string; authMethod: string; current: boolean; sourcePath?: string };
@@ -74,6 +75,8 @@
   let selectedLogContainer: string | undefined;
   let loadingLogs = false;
   let openingWorkloadLogs = false;
+  let openingPodLogs = false;
+  let openingLogPodName = '';
   let logViewport: HTMLPreElement;
   let logRefreshTimer: ReturnType<typeof window.setInterval> | undefined;
   let logRequestGeneration = 0;
@@ -925,30 +928,89 @@
     return Object.entries(asRecord(labels)).slice(0, 16);
   }
 
-  function networkHosts(manifest: Record<string, unknown> | null) {
-    const hosts = new Set<string>();
+  function networkAddressFacts(manifest: Record<string, unknown> | null): NetworkFact[] {
+    const facts: NetworkFact[] = [];
+    const seen = new Set<string>();
     const resource = asRecord(manifest);
     const spec = asRecord(resource.spec);
     const status = asRecord(resource.status);
-    const add = (value: unknown) => { const host = asString(value); if (host) hosts.add(host); };
-    add(spec.externalName);
-    add(spec.clusterIP);
-    asArray(spec.rules).forEach((rule) => add(asRecord(rule).host));
-    asArray(spec.tls).forEach((entry) => asArray(asRecord(entry).hosts).forEach(add));
-    asArray(spec.listeners).forEach((listener) => add(asRecord(listener).hostname));
-    asArray(asRecord(status.loadBalancer).ingress).forEach((entry) => { add(asRecord(entry).hostname); add(asRecord(entry).ip); });
-    return [...hosts];
+    const add = (label: string, value: unknown, tone: NetworkFact['tone'] = 'neutral') => {
+      const text = asString(value);
+      if (!text || text.toLowerCase() === '<none>') return;
+      const key = `${label}\u0000${text}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        facts.push({ label, value: text, tone });
+      }
+    };
+    asArray(spec.clusterIPs).forEach((value) => add('Cluster IP', value, 'primary'));
+    if (!asArray(spec.clusterIPs).length) add('Cluster IP', spec.clusterIP, 'primary');
+    asArray(spec.externalIPs).forEach((value) => add('External IP', value, 'external'));
+    add('External hostname', spec.externalName, 'external');
+    add('Load balancer IP', spec.loadBalancerIP, 'external');
+    asArray(spec.rules).forEach((rule) => add('Host', asRecord(rule).host, 'primary'));
+    asArray(spec.tls).forEach((entry) => asArray(asRecord(entry).hosts).forEach((value) => add('TLS host', value, 'primary')));
+    asArray(spec.listeners).forEach((listener) => add('Listener host', asRecord(listener).hostname, 'primary'));
+    asArray(spec.addresses).forEach((entry) => {
+      if (typeof entry === 'string') add('Address', entry, 'primary');
+      else {
+        const address = asRecord(entry);
+        add(asString(address.type) || 'Address', address.address, 'primary');
+      }
+    });
+    asArray(spec.endpoints).forEach((entry) => {
+      if (typeof entry === 'string') add('Endpoint', entry, 'primary');
+      else {
+        const endpoint = asRecord(entry);
+        asArray(endpoint.addresses).forEach((address) => add('Endpoint', address, 'primary'));
+        add('Endpoint', endpoint.address, 'primary');
+      }
+    });
+    asArray(asRecord(status.loadBalancer).ingress).forEach((entry) => {
+      const ingress = asRecord(entry);
+      add('Load balancer', ingress.hostname, 'external');
+      add('Load balancer', ingress.ip, 'external');
+    });
+    asArray(status.addresses).forEach((entry) => {
+      const address = asRecord(entry);
+      add(asString(address.type) || 'Address', address.address, 'primary');
+    });
+    return facts;
   }
 
-  function networkPorts(manifest: Record<string, unknown> | null) {
+  function networkHosts(manifest: Record<string, unknown> | null) {
+    return networkAddressFacts(manifest).map((fact) => `${fact.label} · ${fact.value}`);
+  }
+
+  function networkPortFacts(manifest: Record<string, unknown> | null): NetworkFact[] {
     const spec = asRecord(asRecord(manifest).spec);
-    const ports = asArray(spec.ports).length ? asArray(spec.ports) : asArray(spec.listeners);
-    return ports.map((entry) => {
+    const facts: NetworkFact[] = [];
+    const seen = new Set<string>();
+    const add = (label: string, value: string, tone: NetworkFact['tone'] = 'neutral') => {
+      const key = `${label}\u0000${value}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        facts.push({ label, value, tone });
+      }
+    };
+    asArray(spec.ports).forEach((entry) => {
       const port = asRecord(entry);
       const number = port.port ?? port.targetPort ?? port.containerPort;
       const target = port.targetPort && port.port !== port.targetPort ? ` → ${port.targetPort}` : '';
-      return `${port.name ? `${port.name} · ` : ''}${number ?? '—'}${target}${port.protocol ? `/${port.protocol}` : ''}`;
+      const nodePort = port.nodePort ? ` · node ${port.nodePort}` : '';
+      add(asString(port.name) || 'Port', `${number ?? '—'}${target}${port.protocol ? `/${port.protocol}` : ''}${nodePort}`, port.nodePort ? 'external' : 'neutral');
     });
+    asArray(spec.listeners).forEach((entry) => {
+      const listener = asRecord(entry);
+      const number = listener.port ?? listener.targetPort ?? '—';
+      const host = asString(listener.hostname) ? ` · ${listener.hostname}` : '';
+      add(asString(listener.name) || 'Listener', `${number}${listener.protocol ? `/${listener.protocol}` : ''}${host}`, 'primary');
+    });
+    return facts;
+  }
+
+  function networkPorts(manifest: Record<string, unknown> | null) {
+    return networkPortFacts(manifest).map((fact) => `${fact.label} · ${fact.value}`);
   }
 
   function networkServiceType(manifest: Record<string, unknown> | null) {
@@ -974,6 +1036,7 @@
     };
     asArray(spec.externalIPs).forEach(add);
     add(spec.externalName);
+    add(spec.loadBalancerIP);
     asArray(asRecord(status.loadBalancer).ingress).forEach((entry) => {
       add(asRecord(entry).ip);
       add(asRecord(entry).hostname);
@@ -1385,6 +1448,8 @@
     logRefreshTimer = undefined;
     logRequestGeneration += 1;
     loadingLogs = false;
+    openingPodLogs = false;
+    openingLogPodName = '';
     logTarget = null;
     logPods = [];
     logPorts = [];
@@ -1560,7 +1625,11 @@
   }
 
   async function openPodLogs(object: ResourceObject, candidates: ResourceObject[] = [], scopeLabel = 'Pod') {
+    if (openingPodLogs) return;
     closeLogs();
+    openingPodLogs = true;
+    openingLogPodName = object.name;
+    await tick();
     stopOverviewRefresh();
     // Logs are deliberately a focused workspace: no previous object editor,
     // YAML surface, or resource list should travel with the stream.
@@ -1574,8 +1643,13 @@
     clusterPickerOpen = false;
     namespaceOpen = false;
     activeView = 'Logs';
-    await selectLogPod(object);
-    logRefreshTimer = window.setInterval(() => loadLogs(), 30_000);
+    try {
+      await selectLogPod(object);
+      logRefreshTimer = window.setInterval(() => loadLogs(), 30_000);
+    } finally {
+      openingPodLogs = false;
+      openingLogPodName = '';
+    }
   }
 
   async function openObject(resource: ResourceDescriptor, object: ResourceObject) {
@@ -2210,7 +2284,8 @@
               <aside class="resource-object-browser" aria-label="Resource objects">
                 {#if selectedResource}
                   <div class="resource-object-heading"><div><span class:custom={selectedResource.crd}>{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind}</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
-                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>Open →</span></button>{/each}</div>{/if}
+                  <div class="resource-object-columns" aria-hidden="true"><span></span><span>Resource</span><span>Scope &amp; age</span><span>Action</span></div>
+                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && openingPodLogs && openingLogPodName === object.name} class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div class="resource-object-primary"><strong>{object.name}</strong></div><div class="resource-object-scope"><span>{object.namespace || 'cluster scoped'}</span><small>{object.createdAt ? resourceAge(object.createdAt) : 'Age unavailable'}</small></div><span class="resource-object-action">{selectedResource.kind === 'Pod' ? (openingPodLogs && openingLogPodName === object.name ? 'Opening logs…' : 'Open logs →') : 'Open →'}</span></button>{/each}</div>{/if}
                 {:else}
                   <div class="resource-object-empty"><span>⌘</span><strong>Select a resource kind</strong><p>Choose a kind from the left. Kuberniva loads only that API.</p></div>
                 {/if}
@@ -2264,8 +2339,8 @@
                               {/if}
                             </section>
                           {/if}
-                          <section class="network-inspector-card"><div><strong>Hosts & addresses</strong><small>Resolved from this resource’s spec and status</small></div>{#if networkHosts(editorManifest).length}<div class="inspector-chip-list">{#each networkHosts(editorManifest) as host}<span>{host}</span>{/each}</div>{:else}<p>No host or address is declared on this resource.</p>{/if}</section>
-                          <section class="network-inspector-card"><div><strong>Ports & listeners</strong><small>Service ports, target ports, or declared listeners</small></div>{#if networkPorts(editorManifest).length}<div class="inspector-chip-list">{#each networkPorts(editorManifest) as port}<span>{port}</span>{/each}</div>{:else}<p>No ports are declared on this resource.</p>{/if}</section>
+                          <section class="network-inspector-card"><div><strong>Hosts &amp; addresses</strong><small>Resolved from this resource’s spec and status</small></div>{#if networkAddressFacts(editorManifest).length}<div class="network-fact-list">{#each networkAddressFacts(editorManifest) as fact}<div class={`network-fact network-fact-${fact.tone}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>{/each}</div>{:else}<p>No host or address is declared on this resource.</p>{/if}</section>
+                          <section class="network-inspector-card"><div><strong>Ports &amp; listeners</strong><small>Declared service ports, node ports, target ports, and listener hosts</small></div>{#if networkPortFacts(editorManifest).length}<div class="network-fact-list">{#each networkPortFacts(editorManifest) as fact}<div class={`network-fact network-fact-${fact.tone}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>{/each}</div>{:else}<p>No ports or listeners are declared on this resource.</p>{/if}</section>
                         {/if}
                         {#if resourceLabels(editorManifest).length}<section class="resource-labels"><strong>Labels</strong><div class="inspector-chip-list">{#each resourceLabels(editorManifest) as [key, value]}<span><b>{key}</b>{value}</span>{/each}</div></section>{/if}
                         <details class="resource-properties" open><summary>Resource properties</summary><pre>{genericResourcePreview(editorManifest)}</pre></details>
@@ -2307,7 +2382,7 @@
                   <div class="grid min-h-96 place-items-center px-6 text-center"><div><div class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-indigo-500/15 text-cyan-300"><Boxes size={22} /></div><h4 class="mb-0 mt-4 text-base font-semibold text-slate-100">{workloadObjects.length ? 'No matching workloads' : `No ${workloadResource?.plural || 'workloads'} found`}</h4><p class="mb-0 mt-2 text-sm text-slate-400">{workloadObjects.length ? 'Try a different name or namespace filter.' : `Nothing was returned for ${namespace}.`}</p></div></div>
                 {:else}
                   <div class="workload-object-list" aria-label={`${workloadResource?.kind || 'Workload'} list`}>
-                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-hidden="true"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Containers</span><span>CPU used</span><span>Memory used</span>{/if}<span>Age</span><span></span></div>
+                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-label="Workload columns"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Containers</span><span>CPU used</span><span>Memory used</span>{/if}<span>Age</span><span></span></div>
                     {#each visibleWorkloadObjects as workload}
                       <button class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-row group" on:click={() => workloadResource && openObject(workloadResource, workload)}>
                         <span class={`workload-status-dot ${workloadStatusTone(workload)}`}></span>
@@ -2315,7 +2390,7 @@
                         <div class="workload-row-fact"><b class={`workload-status-label ${workloadStatusTone(workload)}`}>{workloadStatusLabel(workload)}</b></div>
                         {#if workloadResource?.kind === 'Pod'}<div class="workload-row-fact"><b>{podContainerSummary(workload)}{#if workload.restarts !== undefined && workload.restarts > 0}<small> · {workload.restarts} restarts</small>{/if}</b></div><div class="workload-row-fact"><b title={workload.cpuUsage || 'Metrics unavailable'}>{podMetricLabel(workload.cpuUsage)}</b></div><div class="workload-row-fact"><b title={workload.memoryUsage || 'Metrics unavailable'}>{podMetricLabel(workload.memoryUsage)}</b></div>{/if}
                         <div class="workload-row-fact workload-row-age"><b>{resourceAge(workload.createdAt)}</b></div>
-                        <ChevronRight size={17} class="workload-row-arrow" />
+                        {#if workloadResource?.kind === 'Pod' && openingPodLogs && openingLogPodName === workload.name}<RefreshCw size={17} class="workload-row-arrow workload-action-spinner" />{:else}<ChevronRight size={17} class="workload-row-arrow" />{/if}
                       </button>
                     {/each}
                   </div>
@@ -2439,11 +2514,11 @@
         {:else if loadingRelatedPods}
           <div class="drawer-state"><i></i>Finding Pods for this {selectedResource.kind}…</div>
         {:else if relatedPods !== null}
-          <div class="related-pods"><div class="related-heading"><button on:click={() => { relatedPods = null; relatedObject = null }}>← Back</button><span>Pods selected by this {selectedResource.kind}</span>{#if relatedObject}<button class="inline-yaml" on:click={() => selectedResource && relatedObject && openYamlEditor(selectedResource, relatedObject)}>View YAML</button>{/if}</div>{#if relatedPods.length === 0}<div class="drawer-state">No matching Pods found.</div>{:else}<div class="object-list">{#each relatedPods as pod}<button on:click={() => openPodLogs(pod, relatedPods || [], `${selectedResource?.kind || 'Workload'} · ${relatedObject?.name || 'workload'}`)}><span class="object-icon">□</span><div><strong>{pod.name}</strong><small>{pod.namespace || 'namespace unavailable'}</small></div><span>Logs →</span></button>{/each}</div>{/if}</div>
+          <div class="related-pods"><div class="related-heading"><button on:click={() => { relatedPods = null; relatedObject = null }}>← Back</button><span>Pods selected by this {selectedResource.kind}</span>{#if relatedObject}<button class="inline-yaml" on:click={() => selectedResource && relatedObject && openYamlEditor(selectedResource, relatedObject)}>View YAML</button>{/if}</div>{#if relatedPods.length === 0}<div class="drawer-state">No matching Pods found.</div>{:else}<div class="object-list">{#each relatedPods as pod}<button disabled={openingPodLogs} aria-busy={openingPodLogs && openingLogPodName === pod.name} on:click={() => openPodLogs(pod, relatedPods || [], `${selectedResource?.kind || 'Workload'} · ${relatedObject?.name || 'workload'}`)}><span class="object-icon">□</span><div><strong>{pod.name}</strong><small>{pod.namespace || 'namespace unavailable'}</small></div><span>{openingPodLogs && openingLogPodName === pod.name ? 'Opening logs…' : 'Logs →'}</span></button>{/each}</div>{/if}</div>
         {:else if resourceObjects.length === 0}
           <div class="drawer-state">No {selectedResource.plural} found in this scope.</div>
         {:else}
-          <div class="object-list">{#each resourceObjects as object}<button on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>{selectedResource.kind === 'Pod' ? 'Logs →' : selectedResource.category === 'Workloads' ? 'Pods →' : 'Details →'}</span></button>{/each}</div>
+          <div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && openingPodLogs && openingLogPodName === object.name} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>{selectedResource.kind === 'Pod' ? (openingPodLogs && openingLogPodName === object.name ? 'Opening logs…' : 'Logs →') : selectedResource.category === 'Workloads' ? 'Pods →' : 'Details →'}</span></button>{/each}</div>
         {/if}
         <div class="drawer-footer"><span>Demand-loaded · no background fan-out</span><span>Open an object for its live details.</span></div>
       </div>

@@ -1992,6 +1992,133 @@ main {
 .workload-type-button.workload-type-active > svg { color: #318f87; }
 .workload-type-button > span { min-width: 0; flex: 1; overflow: hidden; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Resource objects read like a small table instead of an unlabeled stack.
+   Keeping the heading and rows on the same grid makes scope, age, and the
+   action column easy to scan on both wide monitors and compact Mac windows. */
+.resource-object-columns {
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(92px, .72fr) 74px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border-bottom: 1px solid #e8e4dc;
+  color: #8a806f;
+  background: #fbfaf6;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.resource-object-columns span:not(:first-child) {
+  padding-left: 8px;
+  border-left: 1px solid #ebe7df;
+}
+.resource-workbench .resource-object-browser .object-list button {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(92px, .72fr) 74px;
+  gap: 8px;
+  align-items: center;
+}
+.resource-object-primary,
+.resource-object-scope { min-width: 0; }
+.resource-object-scope {
+  display: grid !important;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 1px solid #f0ece4;
+}
+.resource-object-scope > span,
+.resource-object-scope > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resource-object-scope > span { color: #657286; font-size: 10px; }
+.resource-object-scope > small { color: #9a988f; font-size: 9px; }
+.resource-object-action {
+  justify-self: end;
+  color: #655ad0 !important;
+  font-size: 9px !important;
+  font-weight: 750;
+  text-align: right;
+  white-space: nowrap;
+}
+.resource-workbench .resource-object-browser .object-list button[aria-busy="true"] .resource-object-action { color: #98722f !important; }
+
+/* Labelled network facts preserve the semantics Kubernetes exposes instead of
+   making cluster IPs, external endpoints, and listeners look interchangeable. */
+.network-fact-list { display: grid; gap: 6px; margin-top: 11px; }
+.network-fact {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(86px, .38fr) minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  padding: 8px 9px;
+  border: 1px solid #e8e4dc;
+  border-radius: 8px;
+  background: rgba(255,255,255,.74);
+}
+.network-fact > span {
+  overflow: hidden;
+  color: #8b857b;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.network-fact > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #46546a;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  font-weight: 650;
+}
+.network-fact-primary { border-color: #d9e6ef; background: #f8fbfe; }
+.network-fact-primary > span { color: #5b8aab; }
+.network-fact-primary > strong { color: #356b8d; }
+.network-fact-external { border-color: #e8d9ab; background: #fffaf0; }
+.network-fact-external > span { color: #a1752c; }
+.network-fact-external > strong { color: #825d20; }
+
+/* The classic table header remains legible while preserving the compact rows. */
+.workload-object-list-header {
+  min-height: 35px;
+  border-top: 1px solid #e5e1d9;
+  border-bottom-color: #dcd8d0;
+  color: #6f7786;
+  background: #f4f1e9;
+  font-size: 9px;
+  letter-spacing: .095em;
+}
+.workload-object-list-header > span:not(:first-child):not(:last-child) {
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 1px solid #e3dfd7;
+}
+.workload-object-list-header > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 1220px) {
+  .resource-object-columns,
+  .resource-workbench .resource-object-browser .object-list button {
+    grid-template-columns: 25px minmax(0, 1fr) minmax(78px, .68fr) 62px;
+    gap: 6px;
+  }
+  .resource-object-action { font-size: 8.5px !important; }
+}
+
+@media (max-width: 760px) {
+  .resource-object-columns { grid-template-columns: 24px minmax(0, 1fr) minmax(74px, .62fr); }
+  .resource-workbench .resource-object-browser .object-list button { grid-template-columns: 24px minmax(0, 1fr) minmax(74px, .62fr); }
+  .resource-object-columns span:last-child,
+  .resource-object-action { display: none !important; }
+}
+
 @container workload-page (max-width: 850px) {
   .workload-grid.workload-detail-open { grid-template-columns: 164px minmax(0, 1fr); }
   .workload-detail-open .workload-inspector {
