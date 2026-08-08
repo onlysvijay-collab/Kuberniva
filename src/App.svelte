@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { Activity, Bell, Boxes, ChevronRight, Command, Container, Database, FileSearch, LayoutDashboard, Menu, RefreshCw, Search, ScrollText, Settings2, SlidersHorizontal, Star, Workflow } from '@lucide/svelte';
+  import type { Window as TauriWindow } from '@tauri-apps/api/window';
+  import { Bell, Boxes, ChevronRight, Command, Container, Database, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, RefreshCw, Search, ScrollText, Settings2, Star, Workflow } from '@lucide/svelte';
 
   type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Settings';
   type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Storage' | 'Cluster' | 'Custom Resources';
@@ -61,6 +62,7 @@
   let selectedResource: ResourceDescriptor | null = null;
   let resourceObjects: ResourceObject[] = [];
   let loadingObjects = false;
+  let resourceRequestGeneration = 0;
   let relatedPods: ResourceObject[] | null = null;
   let loadingRelatedPods = false;
   let logTarget: LogTarget | null = null;
@@ -113,6 +115,7 @@
   let workloadObjects: ResourceObject[] = [];
   let workloadResource: ResourceDescriptor | null = null;
   let loadingWorkloads = false;
+  let workloadRequestGeneration = 0;
   let workloadSearch = '';
   let sidebarHidden = false;
   let persistedClusterNamespaces: Record<string, string> = {};
@@ -145,12 +148,17 @@
   let deletionStep: 1 | 2 = 1;
   let deletionName = '';
   let deletingResource = false;
+  let desktopWindow: TauriWindow | null = null;
+  let windowControlsAvailable = false;
+  let isWindowMaximized = false;
+  let stopWindowResizeListening: (() => void) | undefined;
+  let windowResizeStateTimer: ReturnType<typeof window.setTimeout> | undefined;
   const catalogCache = new Map<string, ClusterCatalog>();
   const clusterSessionCache = new Map<string, ClusterSession>();
   const resourceObjectCache = new Map<string, ResourceObject[]>();
   const workspaceStorageKey = 'kuberniva.workspace.v1';
 
-  const resourceCategories: ResourceCategory[] = ['Workloads', 'Configuration', 'Access Control', 'Network', 'Storage', 'Cluster', 'Custom Resources'];
+  const resourceCategories: ResourceCategory[] = ['Configuration', 'Access Control', 'Network', 'Storage', 'Cluster', 'Custom Resources'];
   let clusters: Cluster[] = [];
   let catalog: ClusterCatalog = { context: '', namespaces: [], resources: [] };
 
@@ -160,15 +168,39 @@
     .slice(0, 10);
   $: favoriteContextCluster = favoriteContextMenu ? clusters.find((cluster) => cluster.id === favoriteContextMenu?.clusterId) : null;
   $: selectedNode = clusterOverview?.nodes.find((node) => node.name === selectedNodeName) || clusterOverview?.nodes[0] || null;
-  $: visibleClusterEvents = clusterEvents.filter((event) =>
+  $: namespaceClusterEvents = clusterEvents.filter((event) =>
+    namespace === 'all namespaces' || !event.namespace || event.namespace === namespace,
+  );
+  $: visibleClusterEvents = namespaceClusterEvents.filter((event) =>
     (eventTypeFilter === 'All' || event.eventType === eventTypeFilter) &&
     `${event.reason || ''} ${event.message || ''} ${event.involvedKind || ''} ${event.involvedName || ''} ${event.namespace || ''}`.toLowerCase().includes(eventSearch.toLowerCase()),
   );
-  $: visibleResources = catalog.resources.filter((resource) =>
+  $: resourceWorkspaceResources = catalog.resources.filter((resource) => resource.category !== 'Workloads');
+  $: visibleResources = resourceWorkspaceResources.filter((resource) =>
     (selectedCategory === 'All resources' || resource.category === selectedCategory) &&
     `${resource.kind} ${resource.plural} ${resource.group}`.toLowerCase().includes(resourceSearch.toLowerCase()),
   ).sort((left, right) => left.kind.localeCompare(right.kind));
-  $: categoryCounts = Object.fromEntries(resourceCategories.map((category) => [category, catalog.resources.filter((resource) => resource.category === category).length]));
+  $: categoryCounts = Object.fromEntries(resourceCategories.map((category) => [category, resourceWorkspaceResources.filter((resource) => resource.category === category).length]));
+  $: showClusterWorkspaceControls = Boolean(activeClusterId) && ['Overview', 'Events', 'Resources', 'Workloads', 'Logs'].includes(activeView);
+  $: refreshingCurrentView = activeView === 'Overview'
+    ? loadingOverview
+    : activeView === 'Events'
+      ? loadingEvents
+      : activeView === 'Resources'
+        ? loadingObjects
+        : activeView === 'Workloads'
+          ? loadingWorkloads
+          : activeView === 'Logs'
+            ? loadingLogs
+            : false;
+  $: namespaceControlBusy = loadingCatalog
+    || (activeView === 'Resources' && loadingObjects)
+    || (activeView === 'Workloads' && loadingWorkloads)
+    || (activeView === 'Logs' && loadingLogs)
+    || loadingEditor
+    || savingEditor
+    || loadingYaml
+    || savingYaml;
   $: readyNodeCount = clusterOverview?.nodes.filter((node) => node.ready).length || 0;
   $: workloadResources = catalog.resources
     .filter((resource) => resource.category === 'Workloads')
@@ -403,7 +435,7 @@
   function restoreClusterSession(cluster: Cluster) {
     const session = clusterSessionCache.get(cluster.id);
     namespace = session?.namespace || persistedClusterNamespaces[cluster.id] || cluster.namespace || 'all namespaces';
-    selectedCategory = session?.selectedCategory || 'All resources';
+    selectedCategory = session?.selectedCategory === 'Workloads' ? 'All resources' : session?.selectedCategory || 'All resources';
     resourceSearch = session?.resourceSearch || '';
     workloadResource = session?.workloadResource || null;
     workloadObjects = session?.workloadObjects || [];
@@ -648,6 +680,9 @@
       await navigateTo('Workloads');
     } else if (activeView === 'Resources' && resourceToReload) {
       await openResource(resourceToReload);
+    } else if (activeView === 'Logs') {
+      closeLogs();
+      await navigateTo('Workloads');
     }
     rememberActiveClusterSession();
     persistWorkspace();
@@ -661,10 +696,87 @@
     resourceObjects = [];
     closeEditor();
     closeYamlEditor();
-    const firstResource = catalog.resources
+    const firstResource = resourceWorkspaceResources
       .filter((resource) => category === 'All resources' || resource.category === category)
       .sort((left, right) => left.kind.localeCompare(right.kind))[0];
     if (firstResource) void openResource(firstResource);
+  }
+
+  async function refreshCurrentView() {
+    if (!activeClusterId || refreshingCurrentView) return;
+    if (activeView === 'Overview') {
+      await loadClusterOverview();
+      return;
+    }
+    if (activeView === 'Events') {
+      await loadClusterEvents(true);
+      return;
+    }
+    if (activeView === 'Workloads') {
+      const resource = workloadResource
+        || workloadResources.find((candidate) => candidate.kind === 'Deployment')
+        || workloadResources[0];
+      if (!resource) return;
+      resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
+      await loadWorkloadResource(resource);
+      return;
+    }
+    if (activeView === 'Resources') {
+      if (!selectedResource) {
+        notify('Choose a resource kind to refresh its live objects.');
+        return;
+      }
+      const resource = selectedResource;
+      resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
+      await openResource(resource);
+      return;
+    }
+    if (activeView === 'Logs') await loadLogs(true);
+  }
+
+  async function syncWindowMaximized() {
+    if (!desktopWindow) return;
+    try {
+      isWindowMaximized = await desktopWindow.isMaximized();
+    } catch {
+      windowControlsAvailable = false;
+    }
+  }
+
+  async function setupWindowControls() {
+    if (!('__TAURI_INTERNALS__' in window)) return;
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      desktopWindow = getCurrentWindow();
+      isWindowMaximized = await desktopWindow.isMaximized();
+      windowControlsAvailable = true;
+      stopWindowResizeListening = await desktopWindow.onResized(() => {
+        if (windowResizeStateTimer) window.clearTimeout(windowResizeStateTimer);
+        windowResizeStateTimer = window.setTimeout(() => void syncWindowMaximized(), 90);
+      });
+    } catch {
+      desktopWindow = null;
+      windowControlsAvailable = false;
+    }
+  }
+
+  async function minimizeWindow() {
+    if (!desktopWindow) return;
+    try {
+      await desktopWindow.minimize();
+    } catch (error) {
+      notify(`Could not minimize the window: ${String(error)}`);
+    }
+  }
+
+  async function toggleWindowMaximized() {
+    if (!desktopWindow) return;
+    try {
+      await desktopWindow.toggleMaximize();
+      await syncWindowMaximized();
+    } catch (error) {
+      notify(`Could not resize the window: ${String(error)}`);
+    }
   }
 
   async function navigateTo(view: View) {
@@ -699,19 +811,23 @@
   }
 
   async function loadWorkloadResource(resource: ResourceDescriptor) {
-    if (loadingWorkloads) return;
+    const requestGeneration = ++workloadRequestGeneration;
+    const requestClusterId = activeClusterId;
+    const requestNamespace = namespace;
+    const requestResourceKey = resourceKey(resource);
     workloadResource = resource;
-    const cacheKey = resourceObjectCacheKey(activeClusterId, resource, namespace);
+    const cacheKey = resourceObjectCacheKey(requestClusterId, resource, requestNamespace);
     const cachedObjects = resourceObjectCache.get(cacheKey);
     if (cachedObjects) {
       workloadObjects = cachedObjects;
+      loadingWorkloads = false;
       return;
     }
     workloadObjects = [];
     loadingWorkloads = true;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      workloadObjects = await invoke<ResourceObject[]>('list_resource_objects', {
+      const response = await invoke<ResourceObject[]>('list_resource_objects', {
         request: {
           kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
           context: activeCluster,
@@ -720,14 +836,22 @@
           kind: resource.kind,
           plural: resource.plural,
           namespaced: resource.namespaced,
-          namespace,
+          namespace: requestNamespace,
         },
       });
-      resourceObjectCache.set(cacheKey, workloadObjects);
+      if (requestGeneration !== workloadRequestGeneration
+        || requestClusterId !== activeClusterId
+        || requestNamespace !== namespace
+        || !workloadResource
+        || resourceKey(workloadResource) !== requestResourceKey) return;
+      workloadObjects = response;
+      resourceObjectCache.set(cacheKey, response);
     } catch (error) {
-      notify(`Could not load ${resource.kind}s: ${String(error)}`);
+      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId) {
+        notify(`Could not load ${resource.kind}s: ${String(error)}`);
+      }
     } finally {
-      loadingWorkloads = false;
+      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId) loadingWorkloads = false;
     }
   }
 
@@ -1490,14 +1614,17 @@
     persistWorkspace();
     closeLogs();
     stopOverviewRefresh();
+    stopWindowResizeListening?.();
+    if (windowResizeStateTimer) window.clearTimeout(windowResizeStateTimer);
   });
 
   onMount(() => {
     void restoreWorkspace();
+    void setupWindowControls();
     const closeFloatingMenus = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       if (!target?.closest('.cluster-selector')) clusterPickerOpen = false;
-      if (!target?.closest('.namespace-picker, .workload-namespace-picker')) namespaceOpen = false;
+      if (!target?.closest('.namespace-picker')) namespaceOpen = false;
       if (!target?.closest('.favorite-context-menu, .favorite-shortcut, .favorite-card-open')) favoriteContextMenu = null;
     };
     window.addEventListener('pointerdown', closeFloatingMenus);
@@ -1506,6 +1633,10 @@
 
   async function loadCluster(cluster: Cluster, force = false) {
     // A Pod name belongs to exactly one cluster context. Never carry its stream across a switch.
+    resourceRequestGeneration += 1;
+    workloadRequestGeneration += 1;
+    loadingObjects = false;
+    loadingWorkloads = false;
     closeLogs();
     closeEditor();
     closeYamlEditor();
@@ -1746,12 +1877,16 @@
   }
 
   async function openResource(resource: ResourceDescriptor) {
+    const requestGeneration = ++resourceRequestGeneration;
+    const requestClusterId = activeClusterId;
+    const requestNamespace = namespace;
+    const requestResourceKey = resourceKey(resource);
     closeEditor();
     closeYamlEditor();
     selectedResource = resource;
     relatedPods = null;
     relatedObject = null;
-    const cacheKey = resourceObjectCacheKey(activeClusterId, resource, namespace);
+    const cacheKey = resourceObjectCacheKey(requestClusterId, resource, requestNamespace);
     const cachedObjects = resourceObjectCache.get(cacheKey);
     if (cachedObjects) {
       resourceObjects = cachedObjects;
@@ -1765,7 +1900,7 @@
         throw new Error('Resource listing is available in the Kuberniva desktop app');
       } else {
         const { invoke } = await import('@tauri-apps/api/core');
-        resourceObjects = await invoke<ResourceObject[]>('list_resource_objects', {
+        const response = await invoke<ResourceObject[]>('list_resource_objects', {
           request: {
             kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
             context: activeCluster,
@@ -1774,15 +1909,23 @@
             kind: resource.kind,
             plural: resource.plural,
             namespaced: resource.namespaced,
-            namespace,
+            namespace: requestNamespace,
           },
         });
-        resourceObjectCache.set(cacheKey, resourceObjects);
+        if (requestGeneration !== resourceRequestGeneration
+          || requestClusterId !== activeClusterId
+          || requestNamespace !== namespace
+          || !selectedResource
+          || resourceKey(selectedResource) !== requestResourceKey) return;
+        resourceObjects = response;
+        resourceObjectCache.set(cacheKey, response);
       }
     } catch (error) {
-      notify(`Could not list ${resource.kind}: ${String(error)}`);
+      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId) {
+        notify(`Could not list ${resource.kind}: ${String(error)}`);
+      }
     } finally {
-      loadingObjects = false;
+      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId) loadingObjects = false;
     }
   }
 </script>
@@ -1807,9 +1950,9 @@
             {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
           </span>
           {view}
-          {#if view === 'Events' && clusterEvents.length}<span class="count">{clusterEvents.length}</span>{/if}
+          {#if view === 'Events' && namespaceClusterEvents.length}<span class="count">{namespaceClusterEvents.length}</span>{/if}
           {#if view === 'Workloads' && workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}
-          {#if view === 'Resources'}<span class="count">{activeClusterId ? catalog.resources.length : 0}</span>{/if}
+          {#if view === 'Resources'}<span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span>{/if}
         </button>
       {/each}
     </nav>
@@ -1823,19 +1966,21 @@
         <small>{favoriteClusters.length}/10</small>
       </div>
       {#if favoriteClusters.length}
-        {#each favoriteClusters as cluster}
-          {#if favoriteRenameId === cluster.id}
-            <form class="favorite-rename" on:submit|preventDefault={saveFavoriteRename}>
-              <input bind:value={favoriteRenameValue} maxlength="80" aria-label={`Rename ${cluster.name} shortcut`} />
-              <button type="submit" aria-label="Save shortcut name" title="Save">✓</button>
-              <button type="button" aria-label="Cancel shortcut rename" title="Cancel" on:click={cancelFavoriteRename}>×</button>
-            </form>
-          {:else}
-            <button class:favorite-shortcut-active={cluster.id === activeClusterId} class="favorite-shortcut" title={`Open ${favoriteLabel(cluster)} · right-click to rename`} on:click={() => { favoriteContextMenu = null; void selectCluster(cluster.id); }} on:contextmenu={(event) => openFavoriteContextMenu(event, cluster)}>
-              <i class="status-dot {cluster.tone}"></i><span>{favoriteLabel(cluster)}</span><b>→</b>
-            </button>
-          {/if}
-        {/each}
+        <div class="sidebar-favorite-list">
+          {#each favoriteClusters as cluster}
+            {#if favoriteRenameId === cluster.id}
+              <form class="favorite-rename" on:submit|preventDefault={saveFavoriteRename}>
+                <input bind:value={favoriteRenameValue} maxlength="80" aria-label={`Rename ${cluster.name} shortcut`} />
+                <button type="submit" aria-label="Save shortcut name" title="Save">✓</button>
+                <button type="button" aria-label="Cancel shortcut rename" title="Cancel" on:click={cancelFavoriteRename}>×</button>
+              </form>
+            {:else}
+              <button class:favorite-shortcut-active={cluster.id === activeClusterId} class="favorite-shortcut" title={`Open ${favoriteLabel(cluster)} · right-click to rename`} on:click={() => { favoriteContextMenu = null; void selectCluster(cluster.id); }} on:contextmenu={(event) => openFavoriteContextMenu(event, cluster)}>
+                <i class="status-dot {cluster.tone}"></i><span>{favoriteLabel(cluster)}</span><b>→</b>
+              </button>
+            {/if}
+          {/each}
+        </div>
       {:else}
         <p>Use the star in Available clusters to add up to 10 shortcuts.</p>
       {/if}
@@ -1857,10 +2002,33 @@
 
   <section class="app-shell">
     <header class="topbar">
-      <div class="toolbar-leading"><button class="sidebar-toggle" aria-label={sidebarHidden ? 'Show sidebar' : 'Hide sidebar'} title={sidebarHidden ? 'Show sidebar' : 'Hide sidebar'} on:click={toggleSidebar}><Menu size={17} strokeWidth={2} /></button><div class="cluster-selector topbar-cluster-selector"><button class:cluster-picker-open={clusterPickerOpen} class="cluster-picker" aria-expanded={clusterPickerOpen} on:click={() => (clusterPickerOpen = !clusterPickerOpen)}><span class="cluster-dot"></span><span class="cluster-picker-copy"><small>Active cluster</small><span class="cluster-picker-name">{activeCluster}</span></span><span class="chevron">⌄</span></button>{#if clusterPickerOpen}<div class="cluster-selector-menu" role="menu" aria-label="Select cluster"><div class="cluster-selector-heading"><span>Clusters</span><b>{clusters.length}</b></div>{#if clusters.length}<div class="cluster-selector-items">{#each clusters as cluster}<button class:chosen={cluster.id === activeClusterId} title={`${cluster.authMethod || cluster.provider} · ${cluster.status}`} on:click={() => selectCluster(cluster.id)}><span class="status-dot {cluster.tone}"></span><span><strong>{cluster.name}</strong><small>{cluster.authMethod || cluster.provider}</small></span>{#if cluster.id === activeClusterId}<i>✓</i>{/if}</button>{/each}</div>{:else}<p class="cluster-selector-empty">No kubeconfig contexts added yet.</p>{/if}<button class="cluster-selector-manage" on:click={() => { clusterPickerOpen = false; void navigateTo('Clusters') }}>Manage clusters <span>→</span></button></div>{/if}</div><div class="breadcrumbs"><span>Workspace</span><span>/</span><strong>{activeCluster}</strong></div></div>
+      <div class="toolbar-leading">
+        <button class="sidebar-toggle" aria-label={sidebarHidden ? 'Show sidebar' : 'Hide sidebar'} title={sidebarHidden ? 'Show sidebar' : 'Hide sidebar'} on:click={toggleSidebar}><Menu size={17} strokeWidth={2} /></button>
+        <div class="cluster-selector topbar-cluster-selector">
+          <button class:cluster-picker-open={clusterPickerOpen} class="cluster-picker" aria-expanded={clusterPickerOpen} on:click={() => (clusterPickerOpen = !clusterPickerOpen)}><span class="cluster-dot"></span><span class="cluster-picker-copy"><small>Active cluster</small><span class="cluster-picker-name">{activeCluster}</span></span><span class="chevron">⌄</span></button>
+          {#if clusterPickerOpen}
+            <div class="cluster-selector-menu" role="menu" aria-label="Select cluster"><div class="cluster-selector-heading"><span>Clusters</span><b>{clusters.length}</b></div>{#if clusters.length}<div class="cluster-selector-items">{#each clusters as cluster}<button class:chosen={cluster.id === activeClusterId} title={`${cluster.authMethod || cluster.provider} · ${cluster.status}`} on:click={() => selectCluster(cluster.id)}><span class="status-dot {cluster.tone}"></span><span><strong>{cluster.name}</strong><small>{cluster.authMethod || cluster.provider}</small></span>{#if cluster.id === activeClusterId}<i>✓</i>{/if}</button>{/each}</div>{:else}<p class="cluster-selector-empty">No kubeconfig contexts added yet.</p>{/if}<button class="cluster-selector-manage" on:click={() => { clusterPickerOpen = false; void navigateTo('Clusters') }}>Manage clusters <span>→</span></button></div>
+          {/if}
+        </div>
+        {#if showClusterWorkspaceControls}
+          <div class="namespace-picker global-namespace-picker">
+            <button class="global-namespace-trigger" disabled={namespaceControlBusy} aria-label={`Namespace: ${namespace === 'all namespaces' ? 'All namespaces' : namespace}`} aria-expanded={namespaceOpen} on:click={() => (namespaceOpen = !namespaceOpen)}><span class="namespace-dot"></span><span class="global-namespace-copy"><small>Namespace</small><strong>{namespace === 'all namespaces' ? 'All namespaces' : namespace}</strong></span><span class="chevron">⌄</span></button>
+            {#if namespaceOpen}
+              <div class="namespace-menu global-namespace-menu" role="menu" aria-label="Select namespace"><button class:namespace-selected={namespace === 'all namespaces'} on:click={() => chooseNamespace('all namespaces')}><span>All namespaces</span>{#if namespace === 'all namespaces'}✓{/if}</button>{#each catalog.namespaces as availableNamespace}<button class:namespace-selected={namespace === availableNamespace} on:click={() => chooseNamespace(availableNamespace)}><span>{availableNamespace}</span>{#if namespace === availableNamespace}✓{/if}</button>{/each}</div>
+            {/if}
+          </div>
+        {/if}
+      </div>
       <div class="top-actions">
         {#if portForwards.length}<div class="port-forward-tray"><button class:port-forward-tray-open={portForwardTrayOpen} class="port-forward-tray-trigger" on:click={() => (portForwardTrayOpen = !portForwardTrayOpen)}>⇄ {portForwards.length} forward{portForwards.length === 1 ? '' : 's'}</button>{#if portForwardTrayOpen}<div class="port-forward-tray-menu"><div><strong>Active port forwards</strong><small>They stop when Kuberniva quits.</small></div>{#each portForwards as forward}<section><div><b>{forward.localAddress}</b><small>{forward.namespace}/{forward.pod} → {forward.remotePort}</small></div><button on:click={() => stopPortForward(forward.id)}>Stop</button></section>{/each}</div>{/if}</div>{/if}
-        <button class="command-button" on:click={() => (commandOpen = true)}><Search size={15} strokeWidth={2} /> Search anything <kbd>⌘ K</kbd></button>
+        {#if showClusterWorkspaceControls}<button class="topbar-refresh" disabled={refreshingCurrentView} aria-label="Refresh current view" title="Refresh only the data shown in this view" on:click={refreshCurrentView}><RefreshCw size={15} class={refreshingCurrentView ? 'animate-spin' : ''} /><span>{refreshingCurrentView ? 'Refreshing…' : 'Refresh'}</span></button>{/if}
+        <button class="command-button" aria-label="Search anything" title="Search anything · ⌘ K" on:click={() => (commandOpen = true)}><Search size={15} strokeWidth={2} /><span>Search anything</span><kbd>⌘ K</kbd></button>
+        {#if windowControlsAvailable}
+          <div class="window-controls" role="group" aria-label="Window controls">
+            <button class="icon-button window-size-button" aria-label="Minimize window" title="Minimize window" on:click={minimizeWindow}><Minus size={17} strokeWidth={1.9} /></button>
+            <button class="icon-button window-size-button" aria-label={isWindowMaximized ? 'Restore window' : 'Maximize window'} title={isWindowMaximized ? 'Restore window' : 'Maximize window'} on:click={toggleWindowMaximized}>{#if isWindowMaximized}<Minimize2 size={17} strokeWidth={1.9} />{:else}<Maximize2 size={17} strokeWidth={1.9} />{/if}</button>
+          </div>
+        {/if}
         {#if notifications.length}
           <button class="icon-button" aria-label={`${notifications.length} notification${notifications.length === 1 ? '' : 's'}`} title="Clear notifications" on:click={() => (notifications = [])}><Bell size={18} strokeWidth={1.9} /><i></i></button>
         {/if}
@@ -1872,9 +2040,6 @@
         <div>
           <div class="title-line"><h1>{activeView}</h1>{#if activeClusterId && !catalogError}<span class="live-pill"><b></b> Live</span>{/if}</div>
           <p>{activeClusterId ? `Browsing ${activeCluster} in real time.` : connectedKubeconfig ? 'Choose a cluster from the sidebar to connect.' : 'Connect a kubeconfig to begin.'}</p>
-        </div>
-        <div class="heading-actions">
-          <button class="secondary" disabled={loadingCatalog} on:click={() => activeClusterId ? refreshActiveCluster() : (kubeconfigOpen = true)}>↻ {loadingCatalog ? 'Connecting…' : activeClusterId ? 'Refresh' : connectedKubeconfig ? 'Manage source' : 'Choose source'}</button>
         </div>
       </div>
 
@@ -1931,8 +2096,8 @@
       {:else if activeView === 'Events'}
         <section class="events-page panel">
           <div class="events-heading">
-            <div><p class="eyebrow">Cluster activity</p><h2>Events</h2><p>Recent Kubernetes events across {activeCluster}. Warnings stay visible until the API server expires them.</p></div>
-            <div class="events-actions"><small>{eventsObservedAt ? `Updated ${formatObservedTime(eventsObservedAt)}` : 'Not loaded yet'}</small><button class="secondary" disabled={loadingEvents || !activeClusterId} on:click={() => loadClusterEvents(true)}>↻ {loadingEvents ? 'Fetching…' : 'Refresh events'}</button></div>
+            <div><p class="eyebrow">Cluster activity</p><h2>Events</h2><p>{namespace === 'all namespaces' ? `Recent Kubernetes events across ${activeCluster}.` : `Recent events for ${namespace}, including cluster-scoped activity.`} Warnings stay visible until the API server expires them.</p></div>
+            <div class="events-actions"><small>{eventsObservedAt ? `Updated ${formatObservedTime(eventsObservedAt)}` : 'Not loaded yet'}</small></div>
           </div>
           {#if !activeClusterId}
             <div class="events-empty"><ScrollText size={28} /><h3>Select a cluster first</h3><p>Events are fetched only after a live cluster is selected.</p></div>
@@ -1943,7 +2108,7 @@
           {:else}
             <div class="events-toolbar">
               <label class="events-search"><Search size={15} /><input bind:value={eventSearch} placeholder="Filter events, reasons, objects…" aria-label="Filter cluster events" /></label>
-              <div class="events-filter" role="group" aria-label="Event severity"><button class:active={eventTypeFilter === 'All'} on:click={() => (eventTypeFilter = 'All')}>All <b>{clusterEvents.length}</b></button><button class:active={eventTypeFilter === 'Warning'} on:click={() => (eventTypeFilter = 'Warning')}>Warnings <b>{clusterEvents.filter((event) => event.eventType === 'Warning').length}</b></button><button class:active={eventTypeFilter === 'Normal'} on:click={() => (eventTypeFilter = 'Normal')}>Normal <b>{clusterEvents.filter((event) => event.eventType !== 'Warning').length}</b></button></div>
+              <div class="events-filter" role="group" aria-label="Event severity"><button class:active={eventTypeFilter === 'All'} on:click={() => (eventTypeFilter = 'All')}>All <b>{namespaceClusterEvents.length}</b></button><button class:active={eventTypeFilter === 'Warning'} on:click={() => (eventTypeFilter = 'Warning')}>Warnings <b>{namespaceClusterEvents.filter((event) => event.eventType === 'Warning').length}</b></button><button class:active={eventTypeFilter === 'Normal'} on:click={() => (eventTypeFilter = 'Normal')}>Normal <b>{namespaceClusterEvents.filter((event) => event.eventType !== 'Warning').length}</b></button></div>
             </div>
             {#if visibleClusterEvents.length}
               <div class="events-list" role="list" aria-label="Cluster events">
@@ -1956,7 +2121,7 @@
                 {/each}
               </div>
             {:else}
-              <div class="events-empty"><ScrollText size={28} /><h3>{clusterEvents.length ? 'No matching events' : 'No recent events'}</h3><p>{clusterEvents.length ? 'Try a different filter or severity.' : 'This cluster has not returned any retained Kubernetes events.'}</p></div>
+              <div class="events-empty"><ScrollText size={28} /><h3>{namespaceClusterEvents.length ? 'No matching events' : 'No recent events'}</h3><p>{namespaceClusterEvents.length ? 'Try a different filter or severity.' : namespace === 'all namespaces' ? 'This cluster has not returned any retained Kubernetes events.' : `No retained events were returned for ${namespace}.`}</p></div>
             {/if}
           {/if}
         </section>
@@ -1977,7 +2142,7 @@
             <div class="overview-summary"><div><strong>{clusterOverview.nodes.length}</strong><span>Nodes</span></div><div><strong>{readyNodeCount}</strong><span>Ready</span></div><div><strong>{clusterOverview.metricsAvailable ? 'Live' : 'Unavailable'}</strong><span>Metrics API</span></div></div>
           </section>
           <section class="node-overview panel">
-            <div class="panel-heading"><div><p class="eyebrow">Infrastructure</p><h2>Nodes</h2><p>{clusterOverview.metricsAvailable ? 'Current CPU and memory are supplied by the Kubernetes Metrics API.' : 'The cluster does not expose the Metrics API; capacity remains available.'}</p></div><div class="overview-actions"><small>Updated {new Date(clusterOverview.observedAt).toLocaleTimeString()}</small><button class="secondary" disabled={loadingOverview} on:click={loadClusterOverview}>↻ {loadingOverview ? 'Updating…' : 'Refresh metrics'}</button></div></div>
+            <div class="panel-heading"><div><p class="eyebrow">Infrastructure</p><h2>Nodes</h2><p>{clusterOverview.metricsAvailable ? 'Current CPU and memory are supplied by the Kubernetes Metrics API.' : 'The cluster does not expose the Metrics API; capacity remains available.'}</p></div><div class="overview-actions"><small>Updated {new Date(clusterOverview.observedAt).toLocaleTimeString()}</small></div></div>
             {#if clusterOverview.nodes.length === 0}
               <div class="node-empty">No Nodes were returned by this cluster.</div>
             {:else}
@@ -2015,26 +2180,13 @@
               </div>
             {/if}
           </section>
-          <section class="overview-quick-actions"><button class="overview-workloads-tile" on:click={() => navigateTo('Workloads')}><span>▦</span><div><em>Operate</em><strong>Workloads</strong><small>Deployments, Pods, logs, terminal access, and ports in the selected namespace.</small></div><b>→</b></button><button class="overview-resources-tile" on:click={() => navigateTo('Resources')}><span>▤</span><div><em>Explore</em><strong>Resources</strong><small>{catalog.resources.length} discovered Kubernetes APIs, including configuration and CRDs.</small></div><b>→</b></button></section>
+          <section class="overview-quick-actions"><button class="overview-workloads-tile" on:click={() => navigateTo('Workloads')}><span>▦</span><div><em>Operate</em><strong>Workloads</strong><small>Deployments, Pods, logs, terminal access, and ports in the selected namespace.</small></div><b>→</b></button><button class="overview-resources-tile" on:click={() => navigateTo('Resources')}><span>▤</span><div><em>Explore</em><strong>Resources</strong><small>{resourceWorkspaceResources.length} discovered configuration, network, storage, access, cluster, and custom APIs.</small></div><b>→</b></button></section>
           </section>
         {:else}
           <section class="overview-loading"><i></i><div><h2>Preparing cluster overview…</h2><p>Waiting for the first live node response.</p></div></section>
         {/if}
       {:else if activeView === 'Resources'}
         <section class="resource-workbench panel">
-          <div class="resource-workbench-heading">
-            <div><p class="eyebrow">Discovered Kubernetes APIs</p><h2>Resources</h2><p>Choose a kind, browse its live objects, then inspect or edit one without leaving the workspace.</p></div>
-            <div class="resource-workbench-heading-actions">
-              <div class="resource-namespace-control">
-                <span>Namespace</span>
-                <div class="namespace-picker">
-                  <button class="namespace-filter" disabled={!activeClusterId || loadingCatalog} aria-label="Namespace" aria-expanded={namespaceOpen} on:click={() => (namespaceOpen = !namespaceOpen)}><span class="namespace-dot"></span>{namespace === 'all namespaces' ? 'All namespaces' : namespace}<span class="chevron">⌄</span></button>
-                  {#if namespaceOpen}<div class="namespace-menu" role="menu"><button class:namespace-selected={namespace === 'all namespaces'} on:click={() => chooseNamespace('all namespaces')}><span>All namespaces</span>{#if namespace === 'all namespaces'}✓{/if}</button>{#each catalog.namespaces as availableNamespace}<button class:namespace-selected={namespace === availableNamespace} on:click={() => chooseNamespace(availableNamespace)}><span>{availableNamespace}</span>{#if namespace === availableNamespace}✓{/if}</button>{/each}</div>{/if}
-                </div>
-              </div>
-              <button class="secondary" disabled={loadingCatalog || !activeClusterId} on:click={refreshActiveCluster}>↻ Refresh API</button>
-            </div>
-          </div>
           {#if !activeClusterId}
             <div class="connection-error"><strong>Select a cluster to begin</strong><p>Kuberniva has only read your local kubeconfig metadata. No cluster connection or OIDC login has been started.</p></div>
           {:else if catalogError}
@@ -2042,7 +2194,7 @@
           {:else if loadingCatalog}
             <div class="connection-error"><strong>Connecting to {activeCluster}…</strong><p>Reading the live API catalog and namespaces.</p></div>
           {:else}
-            <div class="resource-category-tabs" aria-label="Resource categories"><button class:resource-category-active={selectedCategory === 'All resources'} on:click={() => selectResourceCategory('All resources')}>All <b>{catalog.resources.length}</b></button>{#each resourceCategories as category}<button class:resource-category-active={selectedCategory === category} on:click={() => selectResourceCategory(category)}>{category === 'Cluster' ? 'Cluster-scoped' : category}<b>{categoryCounts[category] || 0}</b></button>{/each}</div>
+            <div class="resource-category-tabs" aria-label="Resource categories"><button class:resource-category-active={selectedCategory === 'All resources'} on:click={() => selectResourceCategory('All resources')}>All <b>{resourceWorkspaceResources.length}</b></button>{#each resourceCategories as category}<button class:resource-category-active={selectedCategory === category} title={category === 'Cluster' ? 'Cluster-scoped resources' : category} on:click={() => selectResourceCategory(category)}>{category === 'Cluster' ? 'Cluster' : category === 'Custom Resources' ? 'Custom APIs' : category}<b>{categoryCounts[category] || 0}</b></button>{/each}</div>
             <div class="resource-workbench-body">
               <aside class="resource-kind-browser" aria-label="API resource kinds">
                 <div class="resource-kind-browser-heading"><div><strong>Resource kind</strong><small>{visibleResources.length} available in {selectedCategory === 'All resources' ? 'all categories' : selectedCategory}</small></div></div>
@@ -2058,7 +2210,7 @@
               <aside class="resource-object-browser" aria-label="Resource objects">
                 {#if selectedResource}
                   <div class="resource-object-heading"><div><span class:custom={selectedResource.crd}>{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind}</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
-                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or refresh this API type.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>{selectedResource.kind === 'Pod' ? 'Logs →' : selectedResource.category === 'Workloads' ? 'Details →' : 'Open →'}</span></button>{/each}</div>{/if}
+                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>Open →</span></button>{/each}</div>{/if}
                 {:else}
                   <div class="resource-object-empty"><span>⌘</span><strong>Select a resource kind</strong><p>Choose a kind from the left. Kuberniva loads only that API.</p></div>
                 {/if}
@@ -2134,20 +2286,19 @@
           <section class="empty-view"><div class="explore-orbit"><i></i><i></i><b>▦</b></div><h2>Select a cluster first</h2><p>Workload inventory is loaded only for the cluster and namespace you choose.</p></section>
         {:else}
           <section class="workloads-page font-sans">
-            <div class="mb-6 flex items-end justify-between gap-6">
-              <div>
-                <div class="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-indigo-300"><Activity size={15} class="text-cyan-300" />Live workload inventory</div>
-                <h2 class="m-0 text-4xl font-semibold tracking-tight text-white">Workloads</h2>
-                <p class="mb-0 mt-2 text-sm text-slate-400">Choose a workload type, then inspect its live objects without breaking your flow.</p>
-              </div>
-              <div class="flex items-center gap-2">
-                <div class="workload-namespace-picker relative"><button class="workload-namespace-trigger inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.05] px-3 text-sm font-medium text-slate-200 shadow-sm transition hover:border-indigo-400/50 hover:bg-white/[0.09]" aria-expanded={namespaceOpen} on:click={() => (namespaceOpen = !namespaceOpen)}><SlidersHorizontal size={15} class="text-slate-400" />{namespace}<span class="text-slate-400">⌄</span></button>{#if namespaceOpen}<div class="workload-namespace-menu absolute right-0 top-12 z-30 max-h-80 w-64 overflow-auto rounded-xl border border-white/10 bg-[#171b27] p-1.5 shadow-2xl shadow-black/40" role="menu"><button class:namespace-selected={namespace === 'all namespaces'} class="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm text-slate-300 hover:bg-white/[0.07]" on:click={() => chooseNamespace('all namespaces')}><span>All namespaces</span>{#if namespace === 'all namespaces'}<span class="text-cyan-300">✓</span>{/if}</button>{#each catalog.namespaces as availableNamespace}<button class:namespace-selected={namespace === availableNamespace} class="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm text-slate-300 hover:bg-white/[0.07]" on:click={() => chooseNamespace(availableNamespace)}><span>{availableNamespace}</span>{#if namespace === availableNamespace}<span class="text-cyan-300">✓</span>{/if}</button>{/each}</div>{/if}</div>
-                <button class="inline-flex h-10 items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-950/40 transition hover:from-indigo-400 hover:to-violet-400 disabled:cursor-wait disabled:opacity-60" disabled={loadingWorkloads} on:click={() => navigateTo('Workloads')}><RefreshCw size={15} class={loadingWorkloads ? 'animate-spin' : ''} />Refresh</button>
-              </div>
-            </div>
-
-            <div class:workload-detail-open={editorResource?.category === 'Workloads' && editorObject !== null} class="workload-grid grid min-h-[560px] grid-cols-[230px_minmax(0,1fr)] gap-5">
-              <aside class="rounded-2xl border border-white/10 bg-[#151924]/90 p-3 shadow-2xl shadow-black/10"><div class="border-b border-white/10 px-2 pb-3"><p class="m-0 text-sm font-semibold text-white">Resource types</p><p class="mb-0 mt-1 text-xs text-slate-400">Demand-loaded per type</p></div><div class="mt-2 space-y-1">{#if workloadResources.length}{#each workloadResources as resource}<button class={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2.5 text-left text-sm font-medium transition hover:bg-white/[0.06] ${workloadResource?.kind === resource.kind ? 'bg-indigo-500/15 text-indigo-200 ring-1 ring-inset ring-indigo-400/20' : 'text-slate-400'}`} on:click={() => selectWorkloadResource(resource)}><Boxes size={16} class={workloadResource?.kind === resource.kind ? 'text-cyan-300' : 'text-slate-500'} /><span class="min-w-0 flex-1 truncate">{resource.kind}</span>{#if workloadResource?.kind === resource.kind}<span class="rounded-md bg-black/20 px-1.5 py-0.5 font-mono text-[10px] text-indigo-200">{workloadObjects.length}</span>{/if}</button>{/each}{:else}<p class="px-2 py-4 text-xs leading-5 text-slate-500">No workload APIs were discovered.</p>{/if}</div></aside>
+            <div class:workload-detail-open={editorResource?.category === 'Workloads' && editorObject !== null} class="workload-grid grid min-h-[560px]">
+              <aside class="workload-type-rail" aria-label="Workload resource types">
+                <div class="workload-type-heading"><div><strong>Workload types</strong><small>Loaded on demand</small></div><b>{workloadResources.length}</b></div>
+                <div class="workload-type-list">
+                  {#if workloadResources.length}
+                    {#each workloadResources as resource}
+                      <button class:workload-type-active={workloadResource?.kind === resource.kind} class="workload-type-button" on:click={() => selectWorkloadResource(resource)}><Boxes size={14} /><span>{resource.kind}</span>{#if workloadResource?.kind === resource.kind}<b>{workloadObjects.length}</b>{/if}</button>
+                    {/each}
+                  {:else}
+                    <p>No workload APIs were discovered.</p>
+                  {/if}
+                </div>
+              </aside>
 
               <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
                 {#if loadingWorkloads}
@@ -2216,7 +2367,7 @@
               <div class="log-pod-sidebar-footer">Switch Pods without leaving the log stream. Port forwards remain active until you stop them or quit Kuberniva.</div>
             </aside>
             <div class="log-stream-panel">
-              <div class="log-stream-heading"><div><p class="eyebrow">Streaming output</p><h2>{logTarget.pod}</h2><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="table-actions"><button class="secondary" on:click={() => loadLogs(true)}>↻ Refresh now</button><button class="secondary" on:click={() => { closeLogs(); void navigateTo('Workloads') }}>← Back to workloads</button></div></div>
+              <div class="log-stream-heading"><div><p class="eyebrow">Streaming output</p><h2>{logTarget.pod}</h2><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="table-actions"><button class="secondary" on:click={() => { closeLogs(); void navigateTo('Workloads') }}>← Back to workloads</button></div></div>
               <div class="log-toolbar"><div><strong>Live logs</strong><small>{loadingLogs ? 'Refreshing…' : 'Refreshes every 30 seconds · scroll up to hold your place'}</small></div>{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}</div>
               <pre class="live-log-output" bind:this={logViewport}>{#if logLines.length}{logLines.join('\n')}{:else}No log lines returned yet.{/if}</pre>
             </div>
