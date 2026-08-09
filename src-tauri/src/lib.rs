@@ -27,7 +27,7 @@ use tokio::{
 use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 
 static KUBE_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, Client>>> = OnceLock::new();
-static PORT_FORWARD_SHUTDOWNS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> =
+static PORT_FORWARD_REGISTRY: OnceLock<Mutex<HashMap<String, PortForwardRuntime>>> =
     OnceLock::new();
 static NEXT_PORT_FORWARD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -270,11 +270,18 @@ struct StopPortForwardRequest {
 #[serde(rename_all = "camelCase")]
 struct PortForwardInfo {
     id: String,
+    context: Option<String>,
     local_address: String,
     local_port: u16,
     remote_port: u16,
     namespace: String,
     pod: String,
+}
+
+struct PortForwardRuntime {
+    info: PortForwardInfo,
+    shutdown: oneshot::Sender<()>,
+    stopped: oneshot::Receiver<()>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -368,7 +375,9 @@ struct ClusterEvent {
     last_observed: Option<String>,
 }
 
-fn node_time_string(time: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>) -> Option<String> {
+fn node_time_string(
+    time: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
+) -> Option<String> {
     time.map(|value| value.0.to_string())
 }
 
@@ -478,7 +487,12 @@ fn category_for(group: &str, plural: &str) -> (String, bool, bool) {
     ];
     let custom = !builtin_groups.contains(&group);
     let crd = custom || plural == "customresourcedefinitions";
-    let category = if crd {
+    // Gateway API resources are CRD-backed in most clusters, but they form a
+    // first-class operational surface. Keep them out of the generic custom
+    // resource bucket so Gateways and Routes are immediately discoverable.
+    let category = if group == "gateway.networking.k8s.io" {
+        "Gateway APIs"
+    } else if crd {
         "Custom Resources"
     } else if matches!(
         plural.as_str(),
@@ -796,20 +810,14 @@ async fn pod_usage_map(
         .collect()
 }
 
-fn pod_resource_object(
-    pod: Pod,
-    usage: Option<&(String, String)>,
-) -> ResourceObject {
+fn pod_resource_object(pod: Pod, usage: Option<&(String, String)>) -> ResourceObject {
     let name = pod.metadata.name.unwrap_or_default();
     let namespace = pod.metadata.namespace;
     let created_at = pod
         .metadata
         .creation_timestamp
         .map(|timestamp| timestamp.0.to_string());
-    let total_containers = pod
-        .spec
-        .as_ref()
-        .map(|spec| spec.containers.len() as u32);
+    let total_containers = pod.spec.as_ref().map(|spec| spec.containers.len() as u32);
     let node_name = pod.spec.as_ref().and_then(|spec| spec.node_name.clone());
     let (ready_containers, restarts) = pod
         .status
@@ -829,15 +837,16 @@ fn pod_resource_object(
         name,
         namespace,
         created_at,
-        status: pod
-            .status
-            .as_ref()
-            .and_then(|status| status.phase.clone()),
+        status: pod.status.as_ref().and_then(|status| status.phase.clone()),
         ready_containers: total_containers.map(|_| ready_containers),
         total_containers,
         restarts: total_containers.map(|_| restarts),
-        cpu_usage: usage.map(|usage| usage.0.clone()).filter(|value| !value.is_empty()),
-        memory_usage: usage.map(|usage| usage.1.clone()).filter(|value| !value.is_empty()),
+        cpu_usage: usage
+            .map(|usage| usage.0.clone())
+            .filter(|value| !value.is_empty()),
+        memory_usage: usage
+            .map(|usage| usage.1.clone())
+            .filter(|value| !value.is_empty()),
         node_name,
     }
 }
@@ -1258,8 +1267,13 @@ async fn read_cluster_overview(
                         if key == "kubernetes.io/role" {
                             Some(value.clone())
                         } else {
-                            key.strip_prefix("node-role.kubernetes.io/")
-                                .map(|role| if role.is_empty() { "worker".to_string() } else { role.to_string() })
+                            key.strip_prefix("node-role.kubernetes.io/").map(|role| {
+                                if role.is_empty() {
+                                    "worker".to_string()
+                                } else {
+                                    role.to_string()
+                                }
+                            })
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1269,13 +1283,24 @@ async fn read_cluster_overview(
             };
             let labels = label_map
                 .iter()
-                .map(|(key, value)| NodeProperty { key: key.clone(), value: value.clone() })
+                .map(|(key, value)| NodeProperty {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
                 .collect::<Vec<_>>();
             let annotations = node
                 .metadata
                 .annotations
                 .as_ref()
-                .map(|values| values.iter().map(|(key, value)| NodeProperty { key: key.clone(), value: value.clone() }).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|(key, value)| NodeProperty {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let ready = node
                 .status
@@ -1303,43 +1328,85 @@ async fn read_cluster_overview(
                 .and_then(|capacity| capacity.get("memory"))
                 .map(|quantity| quantity.0.clone());
             let capacity = capacity
-                .map(|values| values.iter().map(|(key, value)| NodeProperty { key: key.clone(), value: value.0.clone() }).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|(key, value)| NodeProperty {
+                            key: key.clone(),
+                            value: value.0.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let allocatable = allocatable
-                .map(|values| values.iter().map(|(key, value)| NodeProperty { key: key.clone(), value: value.0.clone() }).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|(key, value)| NodeProperty {
+                            key: key.clone(),
+                            value: value.0.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let status = node.status.as_ref();
             let node_info = status.and_then(|status| status.node_info.as_ref());
             let conditions = status
                 .and_then(|status| status.conditions.as_ref())
-                .map(|values| values.iter().map(|condition| NodeConditionOverview {
-                    type_: condition.type_.clone(),
-                    status: condition.status.clone(),
-                    reason: condition.reason.clone(),
-                    message: condition.message.clone(),
-                    last_heartbeat_time: node_time_string(condition.last_heartbeat_time.as_ref()),
-                    last_transition_time: node_time_string(condition.last_transition_time.as_ref()),
-                }).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|condition| NodeConditionOverview {
+                            type_: condition.type_.clone(),
+                            status: condition.status.clone(),
+                            reason: condition.reason.clone(),
+                            message: condition.message.clone(),
+                            last_heartbeat_time: node_time_string(
+                                condition.last_heartbeat_time.as_ref(),
+                            ),
+                            last_transition_time: node_time_string(
+                                condition.last_transition_time.as_ref(),
+                            ),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let addresses = status
                 .and_then(|status| status.addresses.as_ref())
-                .map(|values| values.iter().map(|address| NodeAddressOverview { type_: address.type_.clone(), address: address.address.clone() }).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|address| NodeAddressOverview {
+                            type_: address.type_.clone(),
+                            address: address.address.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let taints = node
                 .spec
                 .as_ref()
                 .and_then(|spec| spec.taints.as_ref())
-                .map(|values| values.iter().map(|taint| NodeTaintOverview {
-                    key: taint.key.clone(),
-                    value: taint.value.clone(),
-                    effect: taint.effect.clone(),
-                    time_added: node_time_string(taint.time_added.as_ref()),
-                }).collect())
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|taint| NodeTaintOverview {
+                            key: taint.key.clone(),
+                            value: taint.value.clone(),
+                            effect: taint.effect.clone(),
+                            time_added: node_time_string(taint.time_added.as_ref()),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let pod_cidrs = node
                 .spec
                 .as_ref()
-                .map(|spec| spec.pod_cidrs.clone().unwrap_or_else(|| spec.pod_cidr.clone().into_iter().collect()))
+                .map(|spec| {
+                    spec.pod_cidrs
+                        .clone()
+                        .unwrap_or_else(|| spec.pod_cidr.clone().into_iter().collect())
+                })
                 .unwrap_or_default();
             Some(NodeOverview {
                 name,
@@ -1355,10 +1422,15 @@ async fn read_cluster_overview(
                 os_image: node_info.map(|info| info.os_image.clone()),
                 kernel_version: node_info.map(|info| info.kernel_version.clone()),
                 kubelet_version: node_info.map(|info| info.kubelet_version.clone()),
-                container_runtime_version: node_info.map(|info| info.container_runtime_version.clone()),
+                container_runtime_version: node_info
+                    .map(|info| info.container_runtime_version.clone()),
                 pod_cidrs,
                 provider_id: node.spec.as_ref().and_then(|spec| spec.provider_id.clone()),
-                unschedulable: node.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false),
+                unschedulable: node
+                    .spec
+                    .as_ref()
+                    .and_then(|spec| spec.unschedulable)
+                    .unwrap_or(false),
                 uid: node.metadata.uid.clone(),
                 creation_timestamp: node_time_string(node.metadata.creation_timestamp.as_ref()),
                 capacity,
@@ -1394,7 +1466,10 @@ async fn read_cluster_events(
     context: Option<String>,
 ) -> Result<Vec<ClusterEvent>, String> {
     let client = client_for(kubeconfig_path, context).await?;
-    let params = ListParams { limit: Some(250), ..Default::default() };
+    let params = ListParams {
+        limit: Some(250),
+        ..Default::default()
+    };
     let mut events = Api::<Event>::all(client)
         .list(&params)
         .await
@@ -1415,20 +1490,28 @@ async fn read_cluster_events(
                 .as_ref()
                 .and_then(|time| node_time_string(Some(time)))
                 .or_else(|| event.event_time.as_ref().map(|time| time.0.to_string()));
-            let source = event
-                .reporting_component
-                .clone()
-                .or_else(|| event.source.as_ref().and_then(|source| source.component.clone()));
+            let source = event.reporting_component.clone().or_else(|| {
+                event
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.component.clone())
+            });
             Some(ClusterEvent {
                 name,
-                namespace: event.metadata.namespace.clone().or(event.involved_object.namespace.clone()),
+                namespace: event
+                    .metadata
+                    .namespace
+                    .clone()
+                    .or(event.involved_object.namespace.clone()),
                 event_type: event.type_.unwrap_or_else(|| "Normal".to_string()),
                 reason: event.reason,
                 message: event.message,
                 involved_kind: event.involved_object.kind,
                 involved_name: event.involved_object.name,
                 action: event.action,
-                count: event.count.or_else(|| event.series.as_ref().and_then(|series| series.count)),
+                count: event
+                    .count
+                    .or_else(|| event.series.as_ref().and_then(|series| series.count)),
                 source,
                 first_observed,
                 last_observed,
@@ -1852,6 +1935,7 @@ async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForw
 
     // Resolve credentials before binding a local port so an OIDC/configuration error does not
     // leave a misleading listener behind.
+    let context = request.context.clone();
     let client = client_for(request.kubeconfig_path, request.context).await?;
     let listener = TcpListener::bind(("127.0.0.1", requested_local_port))
         .await
@@ -1868,18 +1952,36 @@ async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForw
         "pf-{}",
         NEXT_PORT_FORWARD_ID.fetch_add(1, Ordering::Relaxed)
     );
+    let info = PortForwardInfo {
+        id: id.clone(),
+        context,
+        local_address: format!("127.0.0.1:{local_port}"),
+        local_port,
+        remote_port: request.remote_port,
+        namespace: request.namespace.clone(),
+        pod: request.pod.clone(),
+    };
     let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
-    PORT_FORWARD_SHUTDOWNS
+    let (stopped_sender, stopped_receiver) = oneshot::channel();
+    PORT_FORWARD_REGISTRY
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| "The port-forward registry is unavailable".to_string())?
-        .insert(id.clone(), shutdown_sender);
+        .insert(
+            id.clone(),
+            PortForwardRuntime {
+                info: info.clone(),
+                shutdown: shutdown_sender,
+                stopped: stopped_receiver,
+            },
+        );
 
     let task_id = id.clone();
     let namespace = request.namespace.clone();
     let pod = request.pod.clone();
     let remote_port = request.remote_port;
     tauri::async_runtime::spawn(async move {
+        let mut connections = Vec::new();
         loop {
             tokio::select! {
                 _ = &mut shutdown_receiver => break,
@@ -1888,7 +1990,8 @@ async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForw
                         let pod_client = client.clone();
                         let pod_namespace = namespace.clone();
                         let pod_name = pod.clone();
-                        tauri::async_runtime::spawn(async move {
+                        connections.retain(|connection: &tokio::task::JoinHandle<()>| !connection.is_finished());
+                        connections.push(tokio::spawn(async move {
                             let pods = Api::<Pod>::namespaced(pod_client, &pod_namespace);
                             match pods.portforward(&pod_name, &[remote_port]).await {
                                 Ok(mut forwarder) => {
@@ -1899,7 +2002,7 @@ async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForw
                                 }
                                 Err(error) => log::warn!("Kuberniva port forward to {pod_namespace}/{pod_name}:{remote_port} failed: {error}"),
                             }
-                        });
+                        }));
                     }
                     Err(error) => {
                         log::warn!("Kuberniva port-forward listener stopped: {error}");
@@ -1908,34 +2011,56 @@ async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForw
                 }
             }
         }
-        if let Some(registry) = PORT_FORWARD_SHUTDOWNS.get() {
+        for connection in connections {
+            connection.abort();
+            let _ = connection.await;
+        }
+        if let Some(registry) = PORT_FORWARD_REGISTRY.get() {
             if let Ok(mut forwards) = registry.lock() {
                 forwards.remove(&task_id);
             }
         }
+        let _ = stopped_sender.send(());
     });
 
-    Ok(PortForwardInfo {
-        id,
-        local_address: format!("127.0.0.1:{local_port}"),
-        local_port,
-        remote_port,
-        namespace: request.namespace,
-        pod: request.pod,
-    })
+    Ok(info)
 }
 
 #[tauri::command]
-async fn stop_port_forward(request: StopPortForwardRequest) -> Result<(), String> {
-    let sender = PORT_FORWARD_SHUTDOWNS
+fn list_port_forwards() -> Result<Vec<PortForwardInfo>, String> {
+    let mut forwards = PORT_FORWARD_REGISTRY
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| "The port-forward registry is unavailable".to_string())?
-        .remove(&request.id);
-    if let Some(sender) = sender {
-        let _ = sender.send(());
-    }
-    Ok(())
+        .values()
+        .map(|runtime| runtime.info.clone())
+        .collect::<Vec<_>>();
+    forwards.sort_by(|left, right| {
+        left.context
+            .cmp(&right.context)
+            .then(left.namespace.cmp(&right.namespace))
+            .then(left.pod.cmp(&right.pod))
+            .then(left.local_port.cmp(&right.local_port))
+    });
+    Ok(forwards)
+}
+
+#[tauri::command]
+async fn stop_port_forward(request: StopPortForwardRequest) -> Result<PortForwardInfo, String> {
+    let runtime = PORT_FORWARD_REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "The port-forward registry is unavailable".to_string())?
+        .remove(&request.id)
+        .ok_or_else(|| "This port forward is no longer active".to_string())?;
+    let PortForwardRuntime {
+        info,
+        shutdown,
+        stopped,
+    } = runtime;
+    let _ = shutdown.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stopped).await;
+    Ok(info)
 }
 
 #[cfg(test)]
@@ -2012,6 +2137,17 @@ mod tests {
         assert_eq!(resource_category, "Custom Resources");
         assert!(resource_custom);
         assert!(resource_crd);
+    }
+
+    #[test]
+    fn gives_gateway_api_resources_their_own_catalog_category() {
+        let (category, custom, crd) = category_for("gateway.networking.k8s.io", "httproutes");
+        assert_eq!(category, "Gateway APIs");
+        assert!(custom);
+        assert!(crd);
+
+        let (gateway_category, _, _) = category_for("gateway.networking.k8s.io", "gateways");
+        assert_eq!(gateway_category, "Gateway APIs");
     }
 
     #[test]
@@ -2139,6 +2275,7 @@ pub fn run() {
             get_pod_runtime,
             exec_pod_command,
             start_port_forward,
+            list_port_forwards,
             stop_port_forward
         ])
         .run(tauri::generate_context!())

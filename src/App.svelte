@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { Window as TauriWindow } from '@tauri-apps/api/window';
-  import { Bell, Boxes, ChevronRight, Command, Container, Database, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, RefreshCw, Search, ScrollText, Settings2, Star, Workflow } from '@lucide/svelte';
+  import { Bell, Boxes, Cable, ChevronRight, Command, Container, Database, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, RefreshCw, Search, ScrollText, Settings2, Star, Workflow } from '@lucide/svelte';
 
-  type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Settings';
-  type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Storage' | 'Cluster' | 'Custom Resources';
+  type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Port forwards' | 'Settings';
+  type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Gateway APIs' | 'Storage' | 'Cluster' | 'Custom Resources';
   type ResourceDescriptor = { group: string; version: string; apiVersion: string; kind: string; plural: string; namespaced: boolean; category: ResourceCategory; custom: boolean; crd: boolean };
   type ClusterCatalog = { context: string; namespaces: string[]; resources: ResourceDescriptor[] };
   type ResourceObject = {
@@ -23,7 +23,8 @@
   type PodLogResponse = { lines: string[]; containers: string[]; selectedContainer?: string; ports: PodPort[] };
   type PodRuntime = { containers: string[]; ports: PodPort[] };
   type PodExecResponse = { stdout: string; stderr: string };
-  type PortForward = { id: string; localAddress: string; localPort: number; remotePort: number; namespace: string; pod: string };
+  type PortForward = { id: string; context?: string; localAddress: string; localPort: number; remotePort: number; namespace: string; pod: string };
+  type OpeningLogsTarget = { key: string; label: string };
   type LogTarget = { pod: string; namespace: string };
   type CertificateInfo = { expiresAt: string; daysRemaining: number; expired: boolean };
   type ResourceDetail = { manifest: Record<string, unknown>; yaml: string; certificate?: CertificateInfo };
@@ -74,18 +75,18 @@
   let logContainers: string[] = [];
   let selectedLogContainer: string | undefined;
   let loadingLogs = false;
-  let openingWorkloadLogs = false;
-  let openingPodLogs = false;
-  let openingLogPodName = '';
+  let openingLogsTarget: OpeningLogsTarget | null = null;
   let logViewport: HTMLPreElement;
   let logRefreshTimer: ReturnType<typeof window.setInterval> | undefined;
   let logRequestGeneration = 0;
+  let logWorkspaceGeneration = 0;
   let portForwardOpen = false;
   let portForwarding = false;
   let portForwardRemotePort = '';
   let portForwardLocalPort = '';
-  let portForwardTrayOpen = false;
   let portForwards: PortForward[] = [];
+  let syncingPortForwards = false;
+  let stoppingPortForwardId = '';
   let workloadDetailMode: 'overview' | 'terminal' = 'overview';
   let terminalPods: ResourceObject[] = [];
   let terminalTarget: LogTarget | null = null;
@@ -161,7 +162,7 @@
   const resourceObjectCache = new Map<string, ResourceObject[]>();
   const workspaceStorageKey = 'kuberniva.workspace.v1';
 
-  const resourceCategories: ResourceCategory[] = ['Configuration', 'Access Control', 'Network', 'Storage', 'Cluster', 'Custom Resources'];
+  const resourceCategories: ResourceCategory[] = ['Configuration', 'Access Control', 'Network', 'Gateway APIs', 'Storage', 'Cluster', 'Custom Resources'];
   let clusters: Cluster[] = [];
   let catalog: ClusterCatalog = { context: '', namespaces: [], resources: [] };
 
@@ -217,6 +218,14 @@
     `${workload.name} ${workload.namespace || ''}`.toLowerCase().includes(workloadSearch.toLowerCase()),
   );
   $: suggestedForwardPorts = [...new Set(logPorts.map((port) => port.port))];
+  $: selectedPodPortForwards = logTarget
+    ? portForwards.filter((forward) => forward.pod === logTarget?.pod
+      && forward.namespace === logTarget?.namespace
+      && (!forward.context || forward.context === activeCluster))
+    : [];
+  $: editorLogsOpening = editorResource && editorObject
+    ? isOpeningLogs(editorResource.kind, editorObject)
+    : false;
   $: focusedEditorEntryData = editorEntries[focusedEditorEntry] || null;
 
   function autoSizeTextarea(node: HTMLTextAreaElement, _value: string) {
@@ -250,6 +259,14 @@
     const months = Math.floor(days / 30);
     if (months < 12) return `${months}mo`;
     return `${Math.floor(months / 12)}y`;
+  }
+
+  function logOpeningKey(kind: string, object: ResourceObject) {
+    return `${kind}\u0000${object.namespace || namespace}\u0000${object.name}`;
+  }
+
+  function isOpeningLogs(kind: string, object: ResourceObject) {
+    return openingLogsTarget?.key === logOpeningKey(kind, object);
   }
 
   function workloadStatusLabel(object: ResourceObject) {
@@ -795,6 +812,11 @@
     relatedPods = null;
     relatedObject = null;
     activeView = view;
+    if (view === 'Port forwards') {
+      stopOverviewRefresh();
+      void syncPortForwards(true);
+      return;
+    }
     if (view === 'Overview' && activeClusterId) {
       void loadClusterOverview();
       startOverviewRefresh();
@@ -949,13 +971,14 @@
     add('External hostname', spec.externalName, 'external');
     add('Load balancer IP', spec.loadBalancerIP, 'external');
     asArray(spec.rules).forEach((rule) => add('Host', asRecord(rule).host, 'primary'));
+    asArray(spec.hostnames).forEach((hostname) => add('Host', hostname, 'primary'));
     asArray(spec.tls).forEach((entry) => asArray(asRecord(entry).hosts).forEach((value) => add('TLS host', value, 'primary')));
     asArray(spec.listeners).forEach((listener) => add('Listener host', asRecord(listener).hostname, 'primary'));
     asArray(spec.addresses).forEach((entry) => {
       if (typeof entry === 'string') add('Address', entry, 'primary');
       else {
         const address = asRecord(entry);
-        add(asString(address.type) || 'Address', address.address, 'primary');
+        add(asString(address.type) || 'Address', address.address ?? address.value, 'primary');
       }
     });
     asArray(spec.endpoints).forEach((entry) => {
@@ -966,14 +989,38 @@
         add('Endpoint', endpoint.address, 'primary');
       }
     });
+    // Legacy Endpoints objects store backend addresses in root-level subsets,
+    // rather than in spec or status. EndpointSlice uses root-level endpoints.
+    // Handle both shapes so the inspector never hides live backend addresses.
+    asArray(resource.subsets).forEach((entry) => {
+      const subset = asRecord(entry);
+      asArray(subset.addresses).forEach((address) => {
+        const endpoint = asRecord(address);
+        add('Endpoint IP', endpoint.ip, 'primary');
+        add('Endpoint host', endpoint.hostname, 'primary');
+      });
+      asArray(subset.notReadyAddresses).forEach((address) => {
+        const endpoint = asRecord(address);
+        add('Not ready endpoint', endpoint.ip, 'neutral');
+        add('Not ready host', endpoint.hostname, 'neutral');
+      });
+    });
+    asArray(resource.endpoints).forEach((entry) => {
+      const endpoint = asRecord(entry);
+      asArray(endpoint.addresses).forEach((address) => add('Endpoint IP', address, 'primary'));
+      add('Endpoint host', endpoint.hostname, 'primary');
+    });
     asArray(asRecord(status.loadBalancer).ingress).forEach((entry) => {
       const ingress = asRecord(entry);
       add('Load balancer', ingress.hostname, 'external');
       add('Load balancer', ingress.ip, 'external');
     });
     asArray(status.addresses).forEach((entry) => {
-      const address = asRecord(entry);
-      add(asString(address.type) || 'Address', address.address, 'primary');
+      if (typeof entry === 'string') add('Address', entry, 'primary');
+      else {
+        const address = asRecord(entry);
+        add(asString(address.type) || 'Address', address.address ?? address.value, 'primary');
+      }
     });
     return facts;
   }
@@ -983,7 +1030,8 @@
   }
 
   function networkPortFacts(manifest: Record<string, unknown> | null): NetworkFact[] {
-    const spec = asRecord(asRecord(manifest).spec);
+    const resource = asRecord(manifest);
+    const spec = asRecord(resource.spec);
     const facts: NetworkFact[] = [];
     const seen = new Set<string>();
     const add = (label: string, value: string, tone: NetworkFact['tone'] = 'neutral') => {
@@ -993,18 +1041,31 @@
         facts.push({ label, value, tone });
       }
     };
-    asArray(spec.ports).forEach((entry) => {
+    const addPort = (entry: unknown, fallbackLabel = 'Port') => {
       const port = asRecord(entry);
       const number = port.port ?? port.targetPort ?? port.containerPort;
       const target = port.targetPort && port.port !== port.targetPort ? ` → ${port.targetPort}` : '';
       const nodePort = port.nodePort ? ` · node ${port.nodePort}` : '';
-      add(asString(port.name) || 'Port', `${number ?? '—'}${target}${port.protocol ? `/${port.protocol}` : ''}${nodePort}`, port.nodePort ? 'external' : 'neutral');
-    });
+      add(asString(port.name) || fallbackLabel, `${number ?? '—'}${target}${port.protocol ? `/${port.protocol}` : ''}${nodePort}`, port.nodePort ? 'external' : 'neutral');
+    };
+    asArray(spec.ports).forEach((entry) => addPort(entry));
+    // Endpoints uses subsets[].ports; EndpointSlice publishes ports at the
+    // object root. Both are backend listener facts, not service spec fields.
+    asArray(resource.subsets).forEach((entry) => asArray(asRecord(entry).ports).forEach((port) => addPort(port, 'Endpoint port')));
+    asArray(resource.ports).forEach((port) => addPort(port, 'Endpoint port'));
     asArray(spec.listeners).forEach((entry) => {
       const listener = asRecord(entry);
       const number = listener.port ?? listener.targetPort ?? '—';
       const host = asString(listener.hostname) ? ` · ${listener.hostname}` : '';
       add(asString(listener.name) || 'Listener', `${number}${listener.protocol ? `/${listener.protocol}` : ''}${host}`, 'primary');
+    });
+    asArray(spec.rules).forEach((rule) => {
+      asArray(asRecord(rule).backendRefs).forEach((entry) => {
+        const backend = asRecord(entry);
+        const name = asString(backend.name) || 'Backend';
+        const port = backend.port;
+        if (port !== undefined && port !== null) add(`Backend · ${name}`, `${port}`, 'primary');
+      });
     });
     return facts;
   }
@@ -1152,22 +1213,26 @@
   }
 
   async function openWorkloadLogs(resource: ResourceDescriptor, object: ResourceObject) {
-    if (openingWorkloadLogs) return;
-    openingWorkloadLogs = true;
+    if (openingLogsTarget) return;
+    const openingKey = logOpeningKey(resource.kind, object);
+    const openingGeneration = logWorkspaceGeneration;
+    openingLogsTarget = { key: openingKey, label: `${resource.kind} · ${object.name}` };
     await tick();
     try {
       const pods = resource.kind === 'Pod' ? [object] : await listWorkloadPods(resource, object);
+      if (openingGeneration !== logWorkspaceGeneration || openingLogsTarget?.key !== openingKey) return;
       if (!pods.length) {
         notify(`No live Pods match ${resource.kind} ${object.name}`);
         return;
       }
       const podNamespace = objectNamespace(pods[0]);
       const podsInNamespace = podNamespace ? await namespacePodIndex(podNamespace, pods) : pods;
-      await openPodLogs(pods[0], podsInNamespace, `${resource.kind} · ${object.name}`);
+      if (openingGeneration !== logWorkspaceGeneration || openingLogsTarget?.key !== openingKey) return;
+      await openPodLogsWorkspace(pods[0], podsInNamespace, `${resource.kind} · ${object.name}`);
     } catch (error) {
-      notify(`Could not open logs for ${object.name}: ${String(error)}`);
+      if (openingLogsTarget?.key === openingKey) notify(`Could not open logs for ${object.name}: ${String(error)}`);
     } finally {
-      openingWorkloadLogs = false;
+      if (openingLogsTarget?.key === openingKey) openingLogsTarget = null;
     }
   }
 
@@ -1356,8 +1421,12 @@
     }
   }
 
-  function closeEditor() {
+  function closeEditor(cancelOpeningLogs = true) {
     if (savingEditor) return;
+    if (cancelOpeningLogs && openingLogsTarget) {
+      openingLogsTarget = null;
+      logWorkspaceGeneration += 1;
+    }
     resetWorkloadTerminal();
     editorResource = null;
     editorObject = null;
@@ -1443,13 +1512,13 @@
     yamlMode = 'view';
   }
 
-  function closeLogs() {
+  function closeLogs(clearOpening = true) {
     if (logRefreshTimer) window.clearInterval(logRefreshTimer);
     logRefreshTimer = undefined;
+    logWorkspaceGeneration += 1;
     logRequestGeneration += 1;
+    if (clearOpening) openingLogsTarget = null;
     loadingLogs = false;
-    openingPodLogs = false;
-    openingLogPodName = '';
     logTarget = null;
     logPods = [];
     logPorts = [];
@@ -1575,6 +1644,19 @@
     portForwardOpen = !portForwardOpen;
   }
 
+  async function syncPortForwards(showError = false) {
+    if (!('__TAURI_INTERNALS__' in window) || syncingPortForwards) return;
+    syncingPortForwards = true;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      portForwards = await invoke<PortForward[]>('list_port_forwards');
+    } catch (error) {
+      if (showError) notify(`Could not check port forwards: ${String(error)}`);
+    } finally {
+      syncingPortForwards = false;
+    }
+  }
+
   function validPort(value: string) {
     const port = Number(value);
     return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
@@ -1601,9 +1683,9 @@
           localPort,
         },
       });
-      portForwards = [...portForwards, forward];
+      portForwards = [...portForwards.filter((candidate) => candidate.id !== forward.id), forward];
+      await syncPortForwards();
       portForwardOpen = false;
-      portForwardTrayOpen = true;
       notify(`Forwarding ${logTarget.pod}:${remotePort} on ${forward.localAddress}`);
     } catch (error) {
       notify(`Could not start port forward: ${String(error)}`);
@@ -1613,27 +1695,28 @@
   }
 
   async function stopPortForward(id: string) {
+    if (stoppingPortForwardId) return;
+    stoppingPortForwardId = id;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('stop_port_forward', { request: { id } });
+      await invoke<PortForward>('stop_port_forward', { request: { id } });
       portForwards = portForwards.filter((forward) => forward.id !== id);
-      if (!portForwards.length) portForwardTrayOpen = false;
       notify('Port forward stopped');
     } catch (error) {
+      await syncPortForwards();
       notify(`Could not stop port forward: ${String(error)}`);
+    } finally {
+      stoppingPortForwardId = '';
     }
   }
 
-  async function openPodLogs(object: ResourceObject, candidates: ResourceObject[] = [], scopeLabel = 'Pod') {
-    if (openingPodLogs) return;
-    closeLogs();
-    openingPodLogs = true;
-    openingLogPodName = object.name;
-    await tick();
+  async function openPodLogsWorkspace(object: ResourceObject, candidates: ResourceObject[] = [], scopeLabel = 'Pod') {
+    closeLogs(false);
+    const workspaceGeneration = logWorkspaceGeneration;
     stopOverviewRefresh();
     // Logs are deliberately a focused workspace: no previous object editor,
     // YAML surface, or resource list should travel with the stream.
-    closeEditor();
+    closeEditor(false);
     closeYamlEditor();
     logPods = availableLogPods(object, candidates);
     logScopeLabel = scopeLabel;
@@ -1643,12 +1726,21 @@
     clusterPickerOpen = false;
     namespaceOpen = false;
     activeView = 'Logs';
+    await selectLogPod(object);
+    if (workspaceGeneration !== logWorkspaceGeneration || activeView !== 'Logs' || !logTarget) return;
+    logRefreshTimer = window.setInterval(() => loadLogs(), 30_000);
+  }
+
+  async function openPodLogs(object: ResourceObject, candidates: ResourceObject[] = [], scopeLabel = 'Pod') {
+    if (openingLogsTarget) return;
+    const openingKey = logOpeningKey('Pod', object);
+    openingLogsTarget = { key: openingKey, label: `Pod · ${object.name}` };
+    await tick();
     try {
-      await selectLogPod(object);
-      logRefreshTimer = window.setInterval(() => loadLogs(), 30_000);
+      if (openingLogsTarget?.key !== openingKey) return;
+      await openPodLogsWorkspace(object, candidates, scopeLabel);
     } finally {
-      openingPodLogs = false;
-      openingLogPodName = '';
+      if (openingLogsTarget?.key === openingKey) openingLogsTarget = null;
     }
   }
 
@@ -1695,6 +1787,7 @@
   onMount(() => {
     void restoreWorkspace();
     void setupWindowControls();
+    void syncPortForwards();
     const closeFloatingMenus = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       if (!target?.closest('.cluster-selector')) clusterPickerOpen = false;
@@ -2018,15 +2111,16 @@
 
     <nav aria-label="Cluster navigation">
       <p class="eyebrow">Cluster workspace</p>
-      {#each ['Overview', 'Events', 'Workloads', 'Resources'] as view}
+      {#each ['Overview', 'Events', 'Workloads', 'Resources', 'Port forwards'] as view}
         <button class:active={activeView === view} class="nav-item" on:click={() => navigateTo(view as View)}>
           <span class="nav-icon">
-            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
+            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else if view === 'Port forwards'}<Cable size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
           </span>
           {view}
           {#if view === 'Events' && namespaceClusterEvents.length}<span class="count">{namespaceClusterEvents.length}</span>{/if}
           {#if view === 'Workloads' && workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}
           {#if view === 'Resources'}<span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span>{/if}
+          {#if view === 'Port forwards'}<span class:port-forward-count-active={portForwards.length > 0} class="count">{portForwards.length}</span>{/if}
         </button>
       {/each}
     </nav>
@@ -2094,7 +2188,6 @@
         {/if}
       </div>
       <div class="top-actions">
-        {#if portForwards.length}<div class="port-forward-tray"><button class:port-forward-tray-open={portForwardTrayOpen} class="port-forward-tray-trigger" on:click={() => (portForwardTrayOpen = !portForwardTrayOpen)}>⇄ {portForwards.length} forward{portForwards.length === 1 ? '' : 's'}</button>{#if portForwardTrayOpen}<div class="port-forward-tray-menu"><div><strong>Active port forwards</strong><small>They stop when Kuberniva quits.</small></div>{#each portForwards as forward}<section><div><b>{forward.localAddress}</b><small>{forward.namespace}/{forward.pod} → {forward.remotePort}</small></div><button on:click={() => stopPortForward(forward.id)}>Stop</button></section>{/each}</div>{/if}</div>{/if}
         {#if showClusterWorkspaceControls}<button class="topbar-refresh" disabled={refreshingCurrentView} aria-label="Refresh current view" title="Refresh only the data shown in this view" on:click={refreshCurrentView}><RefreshCw size={15} class={refreshingCurrentView ? 'animate-spin' : ''} /><span>{refreshingCurrentView ? 'Refreshing…' : 'Refresh'}</span></button>{/if}
         <button class="command-button" aria-label="Search anything" title="Search anything · ⌘ K" on:click={() => (commandOpen = true)}><Search size={15} strokeWidth={2} /><span>Search anything</span><kbd>⌘ K</kbd></button>
         {#if windowControlsAvailable}
@@ -2110,7 +2203,7 @@
     </header>
 
     <div class="content">
-      <div class:cluster-page-heading={activeView === 'Clusters'} class="page-heading">
+      <div class:cluster-page-heading={activeView === 'Clusters'} class:resource-page-heading={activeView === 'Resources'} class="page-heading">
         <div>
           <div class="title-line"><h1>{activeView}</h1>{#if activeClusterId && !catalogError}<span class="live-pill"><b></b> Live</span>{/if}</div>
           <p>{activeClusterId ? `Browsing ${activeCluster} in real time.` : connectedKubeconfig ? 'Choose a cluster from the sidebar to connect.' : 'Connect a kubeconfig to begin.'}</p>
@@ -2268,10 +2361,11 @@
           {:else if loadingCatalog}
             <div class="connection-error"><strong>Connecting to {activeCluster}…</strong><p>Reading the live API catalog and namespaces.</p></div>
           {:else}
+            <div class="resource-workbench-heading"><div class="resource-workbench-title"><span><Database size={21} strokeWidth={1.8} /></span><div><p class="eyebrow">API explorer</p><h2>Resources</h2><p>Choose a Kubernetes API, inspect its live objects, and act without losing your place.</p></div></div><div class="resource-workbench-stat"><strong>{resourceWorkspaceResources.length}</strong><span>API kinds discovered</span></div></div>
             <div class="resource-category-tabs" aria-label="Resource categories"><button class:resource-category-active={selectedCategory === 'All resources'} on:click={() => selectResourceCategory('All resources')}>All <b>{resourceWorkspaceResources.length}</b></button>{#each resourceCategories as category}<button class:resource-category-active={selectedCategory === category} title={category === 'Cluster' ? 'Cluster-scoped resources' : category} on:click={() => selectResourceCategory(category)}>{category === 'Cluster' ? 'Cluster' : category === 'Custom Resources' ? 'Custom APIs' : category}<b>{categoryCounts[category] || 0}</b></button>{/each}</div>
             <div class="resource-workbench-body">
               <aside class="resource-kind-browser" aria-label="API resource kinds">
-                <div class="resource-kind-browser-heading"><div><strong>Resource kind</strong><small>{visibleResources.length} available in {selectedCategory === 'All resources' ? 'all categories' : selectedCategory}</small></div></div>
+                <div class="resource-kind-browser-heading resource-pane-heading"><span>01</span><div><strong>Resource types</strong><small>{visibleResources.length} available in {selectedCategory === 'All resources' ? 'all categories' : selectedCategory}</small></div></div>
                 <label class="resource-kind-search"><Search size={15} /><input bind:value={resourceSearch} placeholder="Filter API resources" aria-label="Filter API resources" /></label>
                 <div class="resource-kind-list">
                   {#if visibleResources.length}
@@ -2283,17 +2377,18 @@
               </aside>
               <aside class="resource-object-browser" aria-label="Resource objects">
                 {#if selectedResource}
-                  <div class="resource-object-heading"><div><span class:custom={selectedResource.crd}>{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind}</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
-                  <div class="resource-object-columns" aria-hidden="true"><span></span><span>Resource</span><span>Scope &amp; age</span><span>Action</span></div>
-                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && openingPodLogs && openingLogPodName === object.name} class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div class="resource-object-primary"><strong>{object.name}</strong></div><div class="resource-object-scope"><span>{object.namespace || 'cluster scoped'}</span><small>{object.createdAt ? resourceAge(object.createdAt) : 'Age unavailable'}</small></div><span class="resource-object-action">{selectedResource.kind === 'Pod' ? (openingPodLogs && openingLogPodName === object.name ? 'Opening logs…' : 'Open logs →') : 'Open →'}</span></button>{/each}</div>{/if}
+                  <div class="resource-object-heading resource-pane-heading"><span class="resource-pane-step">02</span><div><span class:custom={selectedResource.crd} class="resource-pane-icon">{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind} objects</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
+                  <div class="resource-object-columns" aria-hidden="true"><span></span><span>Name</span><span>Namespace</span><span>Age</span><span>Action</span></div>
+                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && isOpeningLogs('Pod', object)} class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div class="resource-object-primary"><strong>{object.name}</strong></div><span class="resource-object-namespace">{object.namespace || 'cluster scoped'}</span><small class="resource-object-age">{object.createdAt ? resourceAge(object.createdAt) : '—'}</small><span class="resource-object-action">{selectedResource.kind === 'Pod' ? (isOpeningLogs('Pod', object) ? 'Opening…' : 'Logs →') : 'Open →'}</span></button>{/each}</div>{/if}
                 {:else}
                   <div class="resource-object-empty"><span>⌘</span><strong>Select a resource kind</strong><p>Choose a kind from the left. Kuberniva loads only that API.</p></div>
                 {/if}
               </aside>
               <aside class="resource-inspector" aria-label="Resource details">
                 <div class="resource-inspector-surface">
+                <div class="resource-details-heading resource-pane-heading"><span>03</span><div><strong>Object details</strong><small>Properties, YAML, and actions</small></div></div>
                 {#if editorResource && editorObject}
-                  <div class="drawer-heading inspector-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Back to resource objects" on:click={closeEditor}>×</button></div>
+                  <div class="drawer-heading inspector-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Back to resource objects" on:click={() => closeEditor()}>×</button></div>
                   {#if loadingEditor}
                     <div class="drawer-state"><i></i>Loading live resource details…</div>
                   {:else}
@@ -2325,7 +2420,7 @@
                     {:else}
                       <div class="inspector-overview">
                         <section class="inspector-summary-grid"><div><span>Kind</span><strong>{editorResource.kind}</strong></div><div><span>Scope</span><strong>{editorObject.namespace || 'Cluster-wide'}</strong></div><div><span>API</span><strong>{editorResource.apiVersion}</strong></div></section>
-                        {#if editorResource.category === 'Network'}
+                        {#if editorResource.category === 'Network' || editorResource.category === 'Gateway APIs'}
                           {#if editorResource.kind === 'Service'}
                             <section class="service-overview-card">
                               <div class="service-overview-heading"><div><span class="service-overview-icon">⇄</span><div><strong>Service routing</strong><small>Exposure, address, and traffic policy</small></div></div><b class="service-type-badge">{networkServiceType(editorManifest)}</b></div>
@@ -2339,8 +2434,8 @@
                               {/if}
                             </section>
                           {/if}
-                          <section class="network-inspector-card"><div><strong>Hosts &amp; addresses</strong><small>Resolved from this resource’s spec and status</small></div>{#if networkAddressFacts(editorManifest).length}<div class="network-fact-list">{#each networkAddressFacts(editorManifest) as fact}<div class={`network-fact network-fact-${fact.tone}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>{/each}</div>{:else}<p>No host or address is declared on this resource.</p>{/if}</section>
-                          <section class="network-inspector-card"><div><strong>Ports &amp; listeners</strong><small>Declared service ports, node ports, target ports, and listener hosts</small></div>{#if networkPortFacts(editorManifest).length}<div class="network-fact-list">{#each networkPortFacts(editorManifest) as fact}<div class={`network-fact network-fact-${fact.tone}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>{/each}</div>{:else}<p>No ports or listeners are declared on this resource.</p>{/if}</section>
+                          <section class="network-inspector-card"><div><strong>Hosts &amp; addresses</strong><small>Resolved from service status, endpoint subsets, and Gateway route hosts</small></div>{#if networkAddressFacts(editorManifest).length}<div class="network-fact-list">{#each networkAddressFacts(editorManifest) as fact}<div class={`network-fact network-fact-${fact.tone}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>{/each}</div>{:else}<p>No host or address is declared on this resource.</p>{/if}</section>
+                          <section class="network-inspector-card"><div><strong>Ports &amp; listeners</strong><small>Service ports, endpoint ports, route backends, and Gateway listeners</small></div>{#if networkPortFacts(editorManifest).length}<div class="network-fact-list">{#each networkPortFacts(editorManifest) as fact}<div class={`network-fact network-fact-${fact.tone}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>{/each}</div>{:else}<p>No ports or listeners are declared on this resource.</p>{/if}</section>
                         {/if}
                         {#if resourceLabels(editorManifest).length}<section class="resource-labels"><strong>Labels</strong><div class="inspector-chip-list">{#each resourceLabels(editorManifest) as [key, value]}<span><b>{key}</b>{value}</span>{/each}</div></section>{/if}
                         <details class="resource-properties" open><summary>Resource properties</summary><pre>{genericResourcePreview(editorManifest)}</pre></details>
@@ -2353,6 +2448,22 @@
                 {/if}
               </div>
             </aside>
+            </div>
+          {/if}
+        </section>
+      {:else if activeView === 'Port forwards'}
+        <section class="port-forwards-page panel">
+          <div class="port-forwards-heading"><div class="port-forwards-heading-mark"><Cable size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Local listeners</p><h2>Port forwarding</h2><p>Every listener below is active in Kuberniva’s native process and remains available until you stop it or quit the app.</p></div><div class:port-forward-summary-active={portForwards.length > 0} class="port-forward-summary"><span class="port-forward-listening-dot"></span><strong>{portForwards.length}</strong><small>{portForwards.length === 1 ? 'active listener' : 'active listeners'}</small></div><button class="secondary port-forward-refresh" disabled={syncingPortForwards} on:click={() => syncPortForwards(true)}><RefreshCw size={15} class={syncingPortForwards ? 'animate-spin' : ''} />{syncingPortForwards ? 'Checking…' : 'Check status'}</button></div>
+          {#if syncingPortForwards && portForwards.length === 0}
+            <div class="port-forward-page-state"><RefreshCw size={21} class="animate-spin" /><strong>Checking native listeners…</strong></div>
+          {:else if portForwards.length === 0}
+            <div class="port-forward-page-empty"><span><Cable size={24} strokeWidth={1.7} /></span><h3>No active port forwards</h3><p>Open a Pod’s logs and choose <strong>Forward</strong>. Active listeners will appear here immediately.</p><button class="primary" on:click={() => navigateTo('Workloads')}>Browse workloads</button></div>
+          {:else}
+            <div class="port-forward-table" role="table" aria-label="Active port forwards">
+              <div class="port-forward-table-header" role="row"><span>Status</span><span>Local listener</span><span>Pod target</span><span>Cluster context</span><span>Action</span></div>
+              {#each portForwards as forward}
+                <div class="port-forward-table-row" role="row"><div class="port-forward-status"><span class="port-forward-listening-dot"></span><strong>Listening</strong></div><div class="port-forward-endpoint"><strong>{forward.localAddress}</strong><small>localhost:{forward.localPort}</small></div><div class="port-forward-endpoint"><strong>{forward.namespace}/{forward.pod}</strong><small>Remote port {forward.remotePort}</small></div><div class="port-forward-context"><strong>{forward.context || 'Current context'}</strong><small>Native Kubernetes tunnel</small></div><button class="port-forward-stop" disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop forward'}</button></div>
+              {/each}
             </div>
           {/if}
         </section>
@@ -2382,7 +2493,7 @@
                   <div class="grid min-h-96 place-items-center px-6 text-center"><div><div class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-indigo-500/15 text-cyan-300"><Boxes size={22} /></div><h4 class="mb-0 mt-4 text-base font-semibold text-slate-100">{workloadObjects.length ? 'No matching workloads' : `No ${workloadResource?.plural || 'workloads'} found`}</h4><p class="mb-0 mt-2 text-sm text-slate-400">{workloadObjects.length ? 'Try a different name or namespace filter.' : `Nothing was returned for ${namespace}.`}</p></div></div>
                 {:else}
                   <div class="workload-object-list" aria-label={`${workloadResource?.kind || 'Workload'} list`}>
-                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-label="Workload columns"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Containers</span><span>CPU used</span><span>Memory used</span>{/if}<span>Age</span><span></span></div>
+                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-label="Workload columns"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Ready</span><span>CPU</span><span>Memory</span>{/if}<span>Age</span><span></span></div>
                     {#each visibleWorkloadObjects as workload}
                       <button class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-row group" on:click={() => workloadResource && openObject(workloadResource, workload)}>
                         <span class={`workload-status-dot ${workloadStatusTone(workload)}`}></span>
@@ -2390,7 +2501,7 @@
                         <div class="workload-row-fact"><b class={`workload-status-label ${workloadStatusTone(workload)}`}>{workloadStatusLabel(workload)}</b></div>
                         {#if workloadResource?.kind === 'Pod'}<div class="workload-row-fact"><b>{podContainerSummary(workload)}{#if workload.restarts !== undefined && workload.restarts > 0}<small> · {workload.restarts} restarts</small>{/if}</b></div><div class="workload-row-fact"><b title={workload.cpuUsage || 'Metrics unavailable'}>{podMetricLabel(workload.cpuUsage)}</b></div><div class="workload-row-fact"><b title={workload.memoryUsage || 'Metrics unavailable'}>{podMetricLabel(workload.memoryUsage)}</b></div>{/if}
                         <div class="workload-row-fact workload-row-age"><b>{resourceAge(workload.createdAt)}</b></div>
-                        {#if workloadResource?.kind === 'Pod' && openingPodLogs && openingLogPodName === workload.name}<RefreshCw size={17} class="workload-row-arrow workload-action-spinner" />{:else}<ChevronRight size={17} class="workload-row-arrow" />{/if}
+                        <ChevronRight size={17} class="workload-row-arrow" />
                       </button>
                     {/each}
                   </div>
@@ -2398,7 +2509,7 @@
               </div>
               {#if editorResource && editorObject && editorResource.category === 'Workloads'}
                 <aside class="workload-inspector" aria-label="Workload details">
-                  <div class="workload-inspector-heading"><div><p class="eyebrow">Live workload details</p><h3>{editorObject.name}</h3><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div><div class="workload-inspector-actions"><button class="workload-delete" disabled={loadingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button><button aria-label="Close workload details" on:click={closeEditor}>×</button></div></div>
+                  <div class="workload-inspector-heading"><div><p class="eyebrow">Live workload details</p><h3>{editorObject.name}</h3><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div><div class="workload-inspector-actions"><button class="workload-delete" disabled={loadingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button><button aria-label="Close workload details" on:click={() => closeEditor()}>×</button></div></div>
                   {#if loadingEditor}
                     <div class="drawer-state"><i></i>Loading live workload details…</div>
                   {:else if workloadDetailMode === 'terminal'}
@@ -2416,7 +2527,7 @@
                     </section>
                   {:else}
                     <div class="workload-inspector-body">
-                      <section class="workload-action-grid"><button class:workload-action-loading={openingWorkloadLogs} class="workload-action-card workload-logs-action" disabled={openingWorkloadLogs} aria-busy={openingWorkloadLogs} on:click={() => openWorkloadLogs(editorResource!, editorObject!)}><span>{#if openingWorkloadLogs}<RefreshCw size={18} class="workload-action-spinner" />{:else}≡{/if}</span><div><strong>{openingWorkloadLogs ? 'Opening logs…' : 'View logs'}</strong><small>{openingWorkloadLogs ? 'Finding live Pods and preparing the stream' : 'Choose a live Pod and stream its output'}</small></div><b>{openingWorkloadLogs ? '•••' : '→'}</b></button><button class="workload-action-card workload-terminal-action" disabled={loadingTerminalPods} on:click={() => openWorkloadTerminal(editorResource!, editorObject!)}><span>⌘</span><div><strong>Terminal</strong><small>Tunnel into a Pod container with Kubernetes exec</small></div><b>→</b></button></section>
+                      <section class="workload-action-grid"><button class:workload-action-loading={editorLogsOpening} class="workload-action-card workload-logs-action" disabled={Boolean(openingLogsTarget)} aria-busy={editorLogsOpening} on:click={() => openWorkloadLogs(editorResource!, editorObject!)}><span>{#if editorLogsOpening}<RefreshCw size={18} class="workload-action-spinner" />{:else}≡{/if}</span><div><strong>{editorLogsOpening ? 'Opening logs…' : 'View logs'}</strong><small>{editorLogsOpening ? `Preparing ${editorResource.kind} logs and the first live stream` : editorResource.kind === 'Pod' ? 'Open this Pod in the full log workspace' : 'Choose a live Pod and stream its output'}</small></div><b>{editorLogsOpening ? '•••' : '→'}</b></button><button class="workload-action-card workload-terminal-action" disabled={loadingTerminalPods || Boolean(openingLogsTarget)} on:click={() => openWorkloadTerminal(editorResource!, editorObject!)}><span>⌘</span><div><strong>Terminal</strong><small>Tunnel into a Pod container with Kubernetes exec</small></div><b>→</b></button></section>
                       <section class="workload-status-grid"><div><span>Replicas</span><strong>{workloadReplicaSummary(editorManifest)}</strong></div><div><span>API</span><strong>{editorResource.apiVersion}</strong></div></section>
                       {#if editorResource.kind === 'Pod'}<section class="workload-pod-facts"><div><span>Phase</span><strong class={`workload-status-label ${workloadStatusTone(editorObject)}`}>{workloadStatusLabel(editorObject)}</strong></div><div><span>Containers</span><strong>{podContainerSummary(editorObject)}</strong></div><div><span>Restarts</span><strong>{editorObject.restarts ?? 0}</strong></div><div><span>Age</span><strong>{resourceAge(editorObject.createdAt)}</strong></div>{#if editorObject.cpuUsage}<div><span>CPU used</span><strong>{editorObject.cpuUsage}</strong></div>{/if}{#if editorObject.memoryUsage}<div><span>Memory used</span><strong>{editorObject.memoryUsage}</strong></div>{/if}{#if editorObject.nodeName}<div class="workload-pod-fact-wide"><span>Node</span><strong>{editorObject.nodeName}</strong></div>{/if}</section>{/if}
                       <section class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>Container images</strong><small>Images declared on the Pod template</small></div><b>{workloadImages(editorManifest).length}</b></div>{#if workloadImages(editorManifest).length}<div class="workload-image-list">{#each workloadImages(editorManifest) as container}<div><span>{container.init ? 'Init' : 'App'}</span><strong>{container.name}</strong><small title={container.image}>{container.image}</small></div>{/each}</div>{:else}<p>No container image is declared on this resource.</p>{/if}</section>
@@ -2439,12 +2550,13 @@
               <div class="log-pod-list">{#each logPods as pod}<button class:log-pod-selected={logTarget.pod === pod.name && logTarget.namespace === (pod.namespace || namespace)} on:click={() => selectLogPod(pod)}><span class="log-pod-dot"></span><div><strong>{pod.name}</strong><small>{pod.namespace || namespace}</small></div><span class="log-pod-arrow">→</span></button>{/each}</div>
               {#if logPorts.length}<section class="log-port-section"><div><span>Container ports</span><small>{logPorts.length}</small></div>{#each logPorts as port}<span class="log-port-chip" title={`${port.container}${port.name ? ` · ${port.name}` : ''} · ${port.protocol}`}><b>{port.port}/{port.protocol}</b><small>{port.container}{port.name ? ` · ${port.name}` : ''}</small></span>{/each}</section>{/if}
               {#if portForwardOpen}<section class="port-forward-form"><div><strong>Port forward</strong><button aria-label="Close port forward" on:click={() => (portForwardOpen = false)}>×</button></div><p>Expose {logTarget.pod} only on this Mac.</p><label>Remote port<input list="kuberniva-pod-ports" type="number" min="1" max="65535" bind:value={portForwardRemotePort} placeholder="e.g. 8080" /></label><datalist id="kuberniva-pod-ports">{#each suggestedForwardPorts as port}<option value={port}></option>{/each}</datalist><label>Local port<input type="number" min="1" max="65535" bind:value={portForwardLocalPort} placeholder="e.g. 8080" /></label><button class="primary" disabled={portForwarding} on:click={startPortForward}>{portForwarding ? 'Starting…' : 'Start forward'}</button></section>{/if}
+              {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Active forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>Local → {forward.remotePort}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
               <div class="log-pod-sidebar-footer">Switch Pods without leaving the log stream. Port forwards remain active until you stop them or quit Kuberniva.</div>
             </aside>
             <div class="log-stream-panel">
               <div class="log-stream-heading"><div><p class="eyebrow">Streaming output</p><h2>{logTarget.pod}</h2><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="table-actions"><button class="secondary" on:click={() => { closeLogs(); void navigateTo('Workloads') }}>← Back to workloads</button></div></div>
-              <div class="log-toolbar"><div><strong>Live logs</strong><small>{loadingLogs ? 'Refreshing…' : 'Refreshes every 30 seconds · scroll up to hold your place'}</small></div>{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}</div>
-              <pre class="live-log-output" bind:this={logViewport}>{#if logLines.length}{logLines.join('\n')}{:else}No log lines returned yet.{/if}</pre>
+              <div class="log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first live stream…' : loadingLogs ? 'Refreshing…' : 'Refreshes every 30 seconds · scroll up to hold your place'}</small></div>{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}</div>
+              {#if loadingLogs && logLines.length === 0}<div class="log-opening-state"><span><RefreshCw size={22} class="animate-spin" /></span><div><p class="eyebrow">Opening logs</p><h3>{logTarget.pod}</h3><p>Connecting to the Pod and preparing the first live output. You can switch Pods from the left after it opens.</p></div></div>{:else}<pre class="live-log-output" bind:this={logViewport}>{#if logLines.length}{logLines.join('\n')}{:else}The Pod returned no log lines for this container yet.{/if}</pre>{/if}
             </div>
           </section>
         {:else}
@@ -2514,11 +2626,11 @@
         {:else if loadingRelatedPods}
           <div class="drawer-state"><i></i>Finding Pods for this {selectedResource.kind}…</div>
         {:else if relatedPods !== null}
-          <div class="related-pods"><div class="related-heading"><button on:click={() => { relatedPods = null; relatedObject = null }}>← Back</button><span>Pods selected by this {selectedResource.kind}</span>{#if relatedObject}<button class="inline-yaml" on:click={() => selectedResource && relatedObject && openYamlEditor(selectedResource, relatedObject)}>View YAML</button>{/if}</div>{#if relatedPods.length === 0}<div class="drawer-state">No matching Pods found.</div>{:else}<div class="object-list">{#each relatedPods as pod}<button disabled={openingPodLogs} aria-busy={openingPodLogs && openingLogPodName === pod.name} on:click={() => openPodLogs(pod, relatedPods || [], `${selectedResource?.kind || 'Workload'} · ${relatedObject?.name || 'workload'}`)}><span class="object-icon">□</span><div><strong>{pod.name}</strong><small>{pod.namespace || 'namespace unavailable'}</small></div><span>{openingPodLogs && openingLogPodName === pod.name ? 'Opening logs…' : 'Logs →'}</span></button>{/each}</div>{/if}</div>
+          <div class="related-pods"><div class="related-heading"><button on:click={() => { relatedPods = null; relatedObject = null }}>← Back</button><span>Pods selected by this {selectedResource.kind}</span>{#if relatedObject}<button class="inline-yaml" on:click={() => selectedResource && relatedObject && openYamlEditor(selectedResource, relatedObject)}>View YAML</button>{/if}</div>{#if relatedPods.length === 0}<div class="drawer-state">No matching Pods found.</div>{:else}<div class="object-list">{#each relatedPods as pod}<button disabled={Boolean(openingLogsTarget)} aria-busy={isOpeningLogs('Pod', pod)} on:click={() => openPodLogs(pod, relatedPods || [], `${selectedResource?.kind || 'Workload'} · ${relatedObject?.name || 'workload'}`)}><span class="object-icon">□</span><div><strong>{pod.name}</strong><small>{pod.namespace || 'namespace unavailable'}</small></div><span>{isOpeningLogs('Pod', pod) ? 'Opening logs…' : 'Logs →'}</span></button>{/each}</div>{/if}</div>
         {:else if resourceObjects.length === 0}
           <div class="drawer-state">No {selectedResource.plural} found in this scope.</div>
         {:else}
-          <div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && openingPodLogs && openingLogPodName === object.name} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>{selectedResource.kind === 'Pod' ? (openingPodLogs && openingLogPodName === object.name ? 'Opening logs…' : 'Logs →') : selectedResource.category === 'Workloads' ? 'Pods →' : 'Details →'}</span></button>{/each}</div>
+          <div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && isOpeningLogs('Pod', object)} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div><strong>{object.name}</strong><small>{object.namespace || 'cluster scoped'} {object.createdAt ? `· ${object.createdAt}` : ''}</small></div><span>{selectedResource.kind === 'Pod' ? (isOpeningLogs('Pod', object) ? 'Opening logs…' : 'Logs →') : selectedResource.category === 'Workloads' ? 'Pods →' : 'Details →'}</span></button>{/each}</div>
         {/if}
         <div class="drawer-footer"><span>Demand-loaded · no background fan-out</span><span>Open an object for its live details.</span></div>
       </div>
@@ -2544,7 +2656,7 @@
   {#if editorResource && editorObject && activeView !== 'Resources' && activeView !== 'Workloads'}
     <aside class="resource-editor-tab" aria-label={`${editorResource.kind} editor`}>
       <div class="resource-editor">
-        <div class="drawer-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Close editor" on:click={closeEditor}>×</button></div>
+        <div class="drawer-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Close editor" on:click={() => closeEditor()}>×</button></div>
         {#if loadingEditor}
           <div class="drawer-state"><i></i>Loading live resource data…</div>
         {:else}
@@ -2577,7 +2689,7 @@
             <div class="drawer-state">This resource has no editable data view yet.</div>
           {/if}
         {/if}
-        <div class="drawer-footer"><span>{editorResource.kind === 'Secret' ? 'Decoded values are never stored by Kuberniva.' : 'Saving uses the cluster resource version.'}</span><div class="editor-footer-actions"><button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>View YAML</button>{#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}<button class="primary" disabled={loadingEditor || savingEditor} on:click={saveEditor}>{savingEditor ? 'Saving…' : 'Save changes'}</button>{:else}<button class="secondary" on:click={closeEditor}>Close</button>{/if}</div></div>
+        <div class="drawer-footer"><span>{editorResource.kind === 'Secret' ? 'Decoded values are never stored by Kuberniva.' : 'Saving uses the cluster resource version.'}</span><div class="editor-footer-actions"><button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>View YAML</button>{#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}<button class="primary" disabled={loadingEditor || savingEditor} on:click={saveEditor}>{savingEditor ? 'Saving…' : 'Save changes'}</button>{:else}<button class="secondary" on:click={() => closeEditor()}>Close</button>{/if}</div></div>
       </div>
     </aside>
   {/if}

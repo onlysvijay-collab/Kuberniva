@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/onlysvijay-collab/Kuberniva/releases"><img src="https://img.shields.io/badge/version-0.2.13-1769aa?style=flat-square" alt="Version 0.2.13"></a>
+  <a href="https://github.com/onlysvijay-collab/Kuberniva/releases"><img src="https://img.shields.io/badge/version-0.2.15-1769aa?style=flat-square" alt="Version 0.2.15"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f855a?style=flat-square" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/Svelte%205-ff3e00?style=flat-square&logo=svelte&logoColor=white" alt="Svelte 5">
   <img src="https://img.shields.io/badge/Tauri%202-24c8db?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
@@ -28,7 +28,7 @@ Kuberniva is an open-source, local-first Kubernetes desktop app. It keeps cluste
 | ⭐ **Shortcuts** | Pin up to 10 clusters, rename their shortcuts, and keep them across restarts. |
 | 📊 **Overview** | See workloads, resources, node readiness, full node details, and live CPU/memory usage when Metrics API is available. |
 | 🛎️ **Events** | Browse recent Kubernetes Events with warning/normal filters and search. |
-| 🧭 **Resources** | Discover built-in APIs and CRDs, browse namespaced or cluster-scoped objects, and inspect metadata, labels, owners, ports, and properties. |
+| 🧭 **Resources** | Discover built-in APIs and CRDs, including a dedicated Gateway APIs view for Gateways, HTTPRoutes, and related route types; inspect metadata, labels, endpoint addresses, ports, and properties. |
 | 📝 **Editors** | Edit ConfigMaps and Secrets as key/value data, reveal Secret values from base64 on demand, edit YAML, save, and view certificate expiry. |
 | 🚀 **Workloads** | Inspect Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs, CronJobs, Pods, and other discovered workload types. |
 | 📜 **Operations** | View sibling-pod logs, select containers, refresh every 30 seconds, preserve scroll position, open a Pod terminal, and start/stop port forwards. |

@@ -386,8 +386,8 @@ main { background: radial-gradient(circle at 72% -13%, rgba(167,184,255,.44), tr
 .terminal-pod-strip { display: grid; gap: 6px; margin-top: 12px; }.terminal-pod-strip > span, .terminal-port-hints > span { color: #7b879a; font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }.terminal-pod-strip > div { display: flex; flex-wrap: wrap; gap: 5px; }.terminal-pod-strip button { max-width: 100%; overflow: hidden; padding: 6px 8px; border: 1px solid #dce3ed; border-radius: 6px; color: #68768b; background: #fff; font-family: "DM Mono", monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.terminal-pod-strip button:hover, .terminal-pod-strip button.terminal-pod-selected { color: #584dca; border-color: #c8c0f6; background: #f0efff; }.terminal-target { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 10px; border: 1px solid #d9e3ee; border-radius: 9px; background: #fff; }.terminal-target > div { min-width: 0; display: grid; gap: 4px; }.terminal-target span { color: #8290a2; font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }.terminal-target strong { overflow: hidden; color: #4a576c; font-family: "DM Mono", monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.terminal-target label { display: grid; gap: 4px; color: #748195; font-size: 9px; font-weight: 700; }.terminal-target select { min-width: 110px; height: 29px; border: 1px solid #d8e0ec; border-radius: 6px; outline: 0; color: #4e5c71; background: #f9fbfd; font-size: 10px; }.terminal-target > small { color: #68758a; font-family: "DM Mono", monospace; font-size: 10px; }.terminal-port-hints { display: grid; gap: 6px; margin-top: 10px; }.terminal-port-hints > div { display: flex; flex-wrap: wrap; gap: 5px; }.terminal-port-hints small { padding: 4px 6px; border-radius: 5px; color: #368d85; background: #eaf8f6; font-family: "DM Mono", monospace; font-size: 9px; }.terminal-command { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: end; margin-top: 13px; }.terminal-command label { display: grid; gap: 5px; color: #6f7d91; font-size: 9px; font-weight: 700; }.terminal-command input { height: 34px; width: 100%; border: 1px solid #d5ddea; border-radius: 7px; outline: 0; color: #3e4b61; background: #fff; font-family: "DM Mono", monospace; font-size: 10px; padding: 0 9px; }.terminal-command input:focus { border-color: #aaa2f1; box-shadow: 0 0 0 3px rgba(125,110,245,.10); }.terminal-command .primary { min-height: 34px; font-size: 10px; }.terminal-output { min-height: 170px; max-height: 300px; overflow: auto; margin: 11px 0 0; padding: 12px; border: 1px solid #273247; border-radius: 9px; color: #d8e4f4; background: #151b28; font-family: "DM Mono", monospace; font-size: 10px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 1330px) { .workload-grid.workload-detail-open { grid-template-columns: 188px minmax(275px,.8fr) minmax(340px,1.1fr); gap: 12px; }.workload-inspector-heading { padding: 17px 16px 13px; }.workload-inspector-body, .workload-terminal { padding: 12px; }.workload-action-grid { grid-template-columns: 1fr; }.workload-image-list > div { grid-template-columns: 29px minmax(55px,.6fr) minmax(0,1.3fr); } }
 
-/* Native port forwards are shown as a compact, persistent local-tool control. */
-.port-forward-tray { position: relative; }.port-forward-tray-trigger, .port-forward-button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #d7d3f7; border-radius: 8px; color: #5d51ca; background: #f4f3ff; font-size: 10px; font-weight: 700; }.port-forward-tray-trigger { min-height: 34px; padding: 0 9px; }.port-forward-tray-trigger:hover, .port-forward-tray-trigger.port-forward-tray-open, .port-forward-button:hover, .port-forward-button.port-forward-open { border-color: #bdb5f2; color: #4e42bc; background: #eceaff; }.port-forward-tray-menu { width: 310px; position: absolute; top: calc(100% + 8px); right: 0; z-index: 70; padding: 12px; border: 1px solid #d6dfeb; border-radius: 12px; background: #fff; box-shadow: 0 20px 42px rgba(41,57,82,.20); }.port-forward-tray-menu > div { display: grid; gap: 3px; padding: 0 2px 9px; }.port-forward-tray-menu strong { color: #3c495e; font-size: 12px; }.port-forward-tray-menu small { color: #8592a3; font-size: 10px; }.port-forward-tray-menu section { display: flex; align-items: center; justify-content: space-between; gap: 9px; padding: 9px 2px; border-top: 1px solid #e8edf2; }.port-forward-tray-menu section > div { min-width: 0; display: grid; gap: 3px; }.port-forward-tray-menu b, .port-forward-tray-menu section small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.port-forward-tray-menu b { color: #4e42bd; font-family: "DM Mono", monospace; font-size: 10px; font-weight: 500; }.port-forward-tray-menu section small { color: #8995a6; font-size: 9px; }.port-forward-tray-menu section button { flex: 0 0 auto; padding: 5px 7px; border-radius: 6px; color: #b4505f; background: #fff0f2; font-size: 9px; font-weight: 700; }
+/* Port forwarding stays in the Logs workspace and its dedicated sidebar page. */
+.port-forward-button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #d7d3f7; border-radius: 8px; color: #5d51ca; background: #f4f3ff; font-size: 10px; font-weight: 700; }.port-forward-button:hover, .port-forward-button.port-forward-open { border-color: #bdb5f2; color: #4e42bc; background: #eceaff; }
 .log-pod-heading-actions { display: grid; justify-items: end; gap: 7px; }.log-pod-heading-actions > span { padding: 3px 6px; border-radius: 999px; color: #6256d2; background: #eceaff; font-family: "DM Mono", monospace; font-size: 9px; }.port-forward-button { min-height: 27px; padding: 0 7px; }.port-forward-form { display: grid; gap: 8px; padding: 12px; border-top: 1px solid #dfe6ee; border-bottom: 1px solid #dfe6ee; background: linear-gradient(145deg, #f5f4ff, #fbfbff); }.port-forward-form > div { display: flex; align-items: center; justify-content: space-between; }.port-forward-form > div strong { color: #4b40bb; font-size: 12px; }.port-forward-form > div button { color: #7d899a; background: transparent; font-size: 18px; line-height: 1; }.port-forward-form p { margin: 0; color: #7d899c; font-size: 10px; line-height: 1.45; }.port-forward-form label { display: grid; gap: 4px; color: #6c7890; font-size: 9px; font-weight: 700; }.port-forward-form input { width: 100%; height: 30px; border: 1px solid #d7dfeb; border-radius: 7px; outline: 0; color: #3e4b61; background: #fff; font-family: "DM Mono", monospace; font-size: 11px; padding: 0 8px; }.port-forward-form input:focus { border-color: #aaa2f1; box-shadow: 0 0 0 3px rgba(125,110,245,.10); }.port-forward-form .primary { min-height: 31px; font-size: 10px; }
 
 /* Configuration data is edited as deliberate, readable entry cards. */
@@ -2154,5 +2154,274 @@ main {
   .global-namespace-picker { min-width: 115px; max-width: 145px; flex-basis: 135px; }
   .command-button { display: none; }
   .topbar-refresh { width: 34px; }
-  .port-forward-tray-trigger { max-width: 74px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* Resources use one clear hierarchy: explorer, API type, live objects, then
+   details. The warm surface stays quiet while teal accents show selection. */
+.page-heading.resource-page-heading { display: none; }
+.resource-workbench-heading {
+  min-height: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e5e0d6;
+  border-left: 4px solid #2f9d92;
+  background: linear-gradient(105deg, #fffdf8 0%, #f8f5ec 62%, #f2faf8 100%);
+}
+.resource-workbench-title { min-width: 0; display: flex; align-items: center; gap: 13px; }
+.resource-workbench-title > span {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid #bfe2dc;
+  border-radius: 12px;
+  color: #237e76;
+  background: #eaf8f5;
+}
+.resource-workbench-title > div { min-width: 0; }
+.resource-workbench-title .eyebrow { margin: 0 0 3px; padding: 0; color: #317f78; font-size: 9px; letter-spacing: .12em; }
+.resource-workbench-title h2 { margin: 0; color: #26364a; font-size: 21px; letter-spacing: -.4px; }
+.resource-workbench-title p:last-child { margin: 3px 0 0; color: #748094; font-size: 10.5px; }
+.resource-workbench-stat { flex: 0 0 auto; display: grid; justify-items: end; gap: 2px; padding: 8px 11px; border: 1px solid #ddd8cb; border-radius: 10px; background: rgba(255,255,255,.72); }
+.resource-workbench-stat strong { color: #2d645f; font-family: "DM Mono", monospace; font-size: 16px; }
+.resource-workbench-stat span { color: #8c877d; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.resource-category-tabs { gap: 5px; padding: 7px 10px; background: #f6f3ec; }
+.resource-category-tabs button { min-height: 34px; border: 1px solid transparent; border-radius: 8px; }
+.resource-category-tabs button:hover { border-color: #ded8cc; background: #fffdf9; }
+.resource-category-tabs button.resource-category-active { color: #236f68; border-color: #bddfd9; background: #edf8f6; box-shadow: inset 0 -2px #32998f; }
+.resource-category-tabs button.resource-category-active b { color: #236f68; background: #d8efeb; }
+.resource-pane-heading {
+  min-height: 55px !important;
+  position: relative;
+  border-bottom: 1px solid #e4dfd5 !important;
+  background: linear-gradient(180deg, #fffefb, #f6f3ec) !important;
+}
+.resource-kind-browser-heading.resource-pane-heading,
+.resource-details-heading.resource-pane-heading {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+}
+.resource-pane-heading > span:first-child,
+.resource-pane-step {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #c8ded9;
+  border-radius: 7px;
+  color: #287b73;
+  background: #edf8f5;
+  font-family: "DM Mono", monospace;
+  font-size: 8px;
+  font-weight: 800;
+}
+.resource-pane-heading strong { color: #2f3d51 !important; font-size: 13px !important; font-weight: 800 !important; }
+.resource-pane-heading small { margin-top: 2px !important; color: #808a99 !important; font-size: 9px !important; }
+.resource-object-heading.resource-pane-heading {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.resource-object-heading.resource-pane-heading > div { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.resource-pane-icon { width: 25px !important; height: 25px !important; border-radius: 7px !important; }
+.resource-details-heading { flex: 0 0 auto; }
+.resource-kind-list > button.resource-kind-active {
+  color: #236f68;
+  background: linear-gradient(90deg, #e7f6f3, #f7fbfa);
+  box-shadow: inset 3px 0 #32998f;
+}
+.resource-kind-list > button.resource-kind-active > span { color: #247d75; background: #d9f1ed; }
+
+/* Resource object headings and values share the exact same five columns. */
+.resource-object-columns,
+.resource-workbench .resource-object-browser .object-list button {
+  grid-template-columns: 28px minmax(78px, 1fr) minmax(72px, .62fr) 42px 68px;
+  gap: 7px;
+}
+.resource-object-browser { container-name: resource-objects; container-type: inline-size; }
+.resource-object-columns { min-height: 30px; color: #716d64; background: #f1eee7; }
+.resource-object-columns span:not(:first-child) { padding-left: 0; border-left: 0; }
+.resource-object-namespace,
+.resource-object-age {
+  min-width: 0;
+  overflow: hidden;
+  color: #687589;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resource-object-namespace { font-family: "DM Mono", monospace; }
+.resource-object-age { color: #8a928f; }
+.resource-details-heading > div { min-width: 0; display: grid; gap: 2px; }
+
+@container resource-objects (max-width: 380px) {
+  .resource-object-columns,
+  .resource-workbench .resource-object-browser .object-list button {
+    grid-template-columns: 25px minmax(74px, 1fr) minmax(62px, .58fr) 36px;
+    gap: 6px;
+  }
+  .resource-object-columns span:last-child,
+  .resource-object-action { display: none !important; }
+}
+
+/* Workload headers and values use one shared grid at every width. */
+.workload-list-panel { container-name: workload-list; container-type: inline-size; }
+.workload-object-list-header,
+.workload-object-row {
+  --workload-columns: 9px minmax(140px, 1fr) minmax(64px, .58fr) minmax(76px, .65fr) minmax(64px, .58fr) minmax(78px, .68fr) 58px 18px;
+  grid-template-columns: var(--workload-columns);
+}
+.workload-object-list-header:not(.workload-pod-row),
+.workload-object-row:not(.workload-pod-row) {
+  --workload-columns: 9px minmax(160px, 1fr) minmax(92px, .72fr) 70px 18px;
+  grid-template-columns: var(--workload-columns);
+}
+.workload-object-list-header > span:not(:first-child):not(:last-child) { padding-left: 0; border-left: 0; }
+@container workload-list (max-width: 680px) {
+  .workload-object-list-header,
+  .workload-object-row {
+    --workload-columns: 9px minmax(120px, 1fr) 62px 72px 60px 72px 52px 18px;
+    min-width: 550px;
+    gap: 8px;
+  }
+  .workload-object-list-header:not(.workload-pod-row),
+  .workload-object-row:not(.workload-pod-row) {
+    --workload-columns: 9px minmax(145px, 1fr) 82px 58px 18px;
+    min-width: 360px;
+  }
+}
+
+/* Initial log loading is an explicit state, so a fast Pod path and a slower
+   Deployment selector path communicate the same action. */
+.log-opening-state {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 430px);
+  place-content: center;
+  gap: 15px;
+  padding: 30px;
+  color: #cbd5e5;
+  background: radial-gradient(circle at 48% 42%, #182331 0%, #101720 46%, #0d121a 100%);
+}
+.log-opening-state > span { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid #35536a; border-radius: 13px; color: #55c8bc; background: #172631; }
+.log-opening-state .eyebrow { margin: 0 0 5px; padding: 0; color: #64c9bf; }
+.log-opening-state h3 { margin: 0; overflow: hidden; color: #f1f5f9; font-family: "DM Mono", monospace; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.log-opening-state p:last-child { margin: 7px 0 0; color: #8997aa; font-size: 11px; line-height: 1.55; }
+
+/* Native listener status is shown where it is actionable: in Logs and the
+   dedicated Port forwards workspace. */
+.port-forward-listening-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #42b878; box-shadow: 0 0 0 3px rgba(66,184,120,.14); }
+.port-forward-count-active { color: #26795e !important; background: #dff3e8 !important; }
+.log-active-forwards { display: grid; gap: 7px; padding: 10px 11px; border-top: 1px solid #dfe6ee; background: #f7fbf9; }
+.log-active-forwards > div:first-child { display: flex; justify-content: space-between; color: #68778a; font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.log-active-forward { min-width: 0; display: grid; grid-template-columns: 8px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px; border: 1px solid #cfe7dc; border-radius: 8px; background: #fff; }
+.log-active-forward > div { min-width: 0; display: grid; gap: 2px; }
+.log-active-forward strong, .log-active-forward small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-active-forward strong { color: #34765d; font-family: "DM Mono", monospace; font-size: 9px; }
+.log-active-forward small { color: #829087; font-size: 8px; }
+.log-active-forward button { padding: 5px 6px; border-radius: 6px; color: #ad4c5b; background: #fff0f2; font-size: 8px; font-weight: 800; }
+.port-forwards-page { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.port-forwards-heading { min-height: 112px; display: grid; grid-template-columns: 48px minmax(0,1fr) auto auto; align-items: center; gap: 14px; padding: 18px 20px; border-bottom: 1px solid #e3e6eb; background: linear-gradient(110deg, #fffdf8, #f7f5ed 58%, #eff9f6); }
+.port-forwards-heading-mark { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid #bedfd7; border-radius: 12px; color: #287d74; background: #eaf7f4; }
+.port-forwards-heading .eyebrow { margin: 0 0 3px; padding: 0; color: #317f77; }
+.port-forwards-heading h2 { margin: 0; color: #2d3b50; font-size: 20px; }
+.port-forwards-heading p:last-child { max-width: 690px; margin: 4px 0 0; color: #748195; font-size: 10.5px; line-height: 1.45; }
+.port-forward-summary { display: grid; grid-template-columns: 8px auto; column-gap: 8px; align-items: center; padding: 8px 11px; border: 1px solid #dfe3e8; border-radius: 10px; background: #fff; }
+.port-forward-summary strong { color: #4e5c70; font-family: "DM Mono", monospace; font-size: 15px; }
+.port-forward-summary small { grid-column: 1 / -1; color: #8792a1; font-size: 8px; }
+.port-forward-summary-active { border-color: #bfe2d0; background: #f1faf5; }
+.port-forward-refresh { min-height: 35px; display: inline-flex; align-items: center; gap: 7px; }
+.port-forward-table { min-height: 0; flex: 1; overflow: auto; scrollbar-gutter: stable; }
+.port-forward-table-header,
+.port-forward-table-row { min-width: 820px; display: grid; grid-template-columns: 100px minmax(150px,.8fr) minmax(210px,1.2fr) minmax(150px,.8fr) 104px; align-items: center; gap: 12px; }
+.port-forward-table-header { min-height: 36px; position: sticky; top: 0; z-index: 2; padding: 0 18px; border-bottom: 1px solid #dedbd3; color: #756f65; background: #f2efe8; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.port-forward-table-row { min-height: 72px; padding: 10px 18px; border-bottom: 1px solid #e7ebef; background: #fff; }
+.port-forward-status { display: flex; align-items: center; gap: 8px; }
+.port-forward-status strong { color: #2e805f; font-size: 10px; }
+.port-forward-endpoint,
+.port-forward-context { min-width: 0; display: grid; gap: 4px; }
+.port-forward-endpoint strong,
+.port-forward-context strong,
+.port-forward-endpoint small,
+.port-forward-context small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.port-forward-endpoint strong { color: #405069; font-family: "DM Mono", monospace; font-size: 10px; }
+.port-forward-context strong { color: #4e5d72; font-size: 10px; }
+.port-forward-endpoint small,
+.port-forward-context small { color: #8793a3; font-size: 9px; }
+.port-forward-stop { justify-self: end; min-height: 31px; padding: 0 9px; border: 1px solid #eccbd2; border-radius: 7px; color: #ad4c5b; background: #fff4f6; font-size: 9px; font-weight: 800; }
+.port-forward-stop:hover:not(:disabled) { border-color: #dfacb6; background: #ffeaee; }
+.port-forward-page-empty,
+.port-forward-page-state { min-height: 0; flex: 1; display: grid; place-items: center; align-content: center; text-align: center; }
+.port-forward-page-empty > span { width: 50px; height: 50px; display: grid; place-items: center; border-radius: 14px; color: #2e8279; background: #e9f7f4; }
+.port-forward-page-empty h3 { margin: 14px 0 0; color: #364359; font-size: 16px; }
+.port-forward-page-empty p { max-width: 430px; margin: 7px 0 15px; color: #7a8698; font-size: 11px; line-height: 1.5; }
+.port-forward-page-state { gap: 10px; color: #607086; }
+
+@media (max-width: 1220px) {
+  .resource-object-columns,
+  .resource-workbench .resource-object-browser .object-list button { grid-template-columns: 25px minmax(74px,1fr) minmax(62px,.58fr) 36px; }
+  .resource-object-columns span:last-child,
+  .resource-object-action { display: none !important; }
+  .port-forwards-heading { grid-template-columns: 44px minmax(0,1fr) auto; }
+  .port-forward-refresh { grid-column: 2 / -1; justify-self: end; }
+}
+
+@media (max-width: 1100px) {
+  .port-forward-table-header,
+  .port-forward-table-row {
+    min-width: 0;
+    grid-template-columns: 78px minmax(110px, .75fr) minmax(160px, 1.1fr) minmax(110px, .72fr) 82px;
+    gap: 8px;
+    padding-inline: 12px;
+  }
+  .port-forward-stop { padding-inline: 7px; }
+}
+
+@container app-shell (max-width: 700px) {
+  .resource-workbench-title p:last-child { display: none; }
+  .resource-workbench-stat { display: none; }
+}
+
+/* When the workload inspector is open, the table is the useful navigation
+   rail. Give it enough room for every Pod metric and move the type chooser out
+   of the way; closing the inspector restores the complete type list. */
+@container workload-page (max-width: 1280px) {
+  .workload-grid.workload-detail-open {
+    grid-template-columns: minmax(480px, .94fr) minmax(390px, 1.06fr);
+  }
+  .workload-detail-open .workload-type-rail { display: none; }
+}
+
+@container workload-list (max-width: 680px) {
+  .workload-object-list-header,
+  .workload-object-row {
+    --workload-columns: 9px minmax(108px, 1fr) 58px 62px 52px 64px 46px 16px;
+    min-width: 480px;
+    gap: 6px;
+  }
+  .workload-object-list-header:not(.workload-pod-row),
+  .workload-object-row:not(.workload-pod-row) {
+    --workload-columns: 9px minmax(132px, 1fr) 76px 50px 16px;
+    min-width: 330px;
+  }
+}
+
+@container workload-page (max-width: 930px) {
+  .workload-grid.workload-detail-open { grid-template-columns: minmax(0, 1fr); }
+  .workload-detail-open .workload-inspector {
+    position: absolute;
+    inset: 0 0 0 clamp(260px, 38%, 330px);
+    z-index: 12;
+    box-shadow: -16px 0 34px rgba(41, 51, 75, .18);
+  }
 }
