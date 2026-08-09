@@ -318,6 +318,19 @@ struct NodeOverview {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ClusterTotals {
+    cpu_capacity: Option<String>,
+    memory_capacity: Option<String>,
+    storage_capacity: Option<String>,
+    cpu_usage: Option<String>,
+    memory_usage: Option<String>,
+    cpu_usage_percent: Option<f64>,
+    memory_usage_percent: Option<f64>,
+    metric_nodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct NodeProperty {
     key: String,
     value: String,
@@ -354,6 +367,7 @@ struct NodeTaintOverview {
 #[serde(rename_all = "camelCase")]
 struct ClusterOverview {
     nodes: Vec<NodeOverview>,
+    totals: ClusterTotals,
     metrics_available: bool,
     observed_at: String,
 }
@@ -745,6 +759,22 @@ fn format_memory_usage(bytes: f64) -> String {
     } else {
         format!("{}B", bytes.max(0.0).round() as i64)
     }
+}
+
+fn sum_quantities(values: Vec<Option<&str>>, cpu: bool) -> Option<f64> {
+    let values = values
+        .into_iter()
+        .flatten()
+        .filter_map(|value| quantity_as_number(value, cpu))
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.into_iter().sum())
+}
+
+fn node_property_value<'a>(properties: &'a [NodeProperty], key: &str) -> Option<&'a str> {
+    properties
+        .iter()
+        .find(|property| property.key == key)
+        .map(|property| property.value.as_str())
 }
 
 async fn pod_usage_map(
@@ -1453,8 +1483,60 @@ async fn read_cluster_overview(
         })
         .collect::<Vec<_>>();
     nodes.sort_by(|left, right| left.name.cmp(&right.name));
+    let cpu_capacity = sum_quantities(
+        nodes
+            .iter()
+            .map(|node| node.cpu_capacity.as_deref())
+            .collect(),
+        true,
+    );
+    let memory_capacity = sum_quantities(
+        nodes
+            .iter()
+            .map(|node| node.memory_capacity.as_deref())
+            .collect(),
+        false,
+    );
+    let storage_capacity = sum_quantities(
+        nodes
+            .iter()
+            .map(|node| node_property_value(&node.capacity, "ephemeral-storage"))
+            .collect(),
+        false,
+    );
+    let cpu_usage = sum_quantities(
+        nodes.iter().map(|node| node.cpu_usage.as_deref()).collect(),
+        true,
+    );
+    let memory_usage = sum_quantities(
+        nodes
+            .iter()
+            .map(|node| node.memory_usage.as_deref())
+            .collect(),
+        false,
+    );
+    let totals = ClusterTotals {
+        cpu_capacity: cpu_capacity.map(format_cpu_usage),
+        memory_capacity: memory_capacity.map(format_memory_usage),
+        storage_capacity: storage_capacity.map(format_memory_usage),
+        cpu_usage_percent: cpu_usage.zip(cpu_capacity).and_then(|(usage, capacity)| {
+            (capacity > 0.0).then(|| (usage / capacity * 100.0).clamp(0.0, 100.0))
+        }),
+        memory_usage_percent: memory_usage
+            .zip(memory_capacity)
+            .and_then(|(usage, capacity)| {
+                (capacity > 0.0).then(|| (usage / capacity * 100.0).clamp(0.0, 100.0))
+            }),
+        cpu_usage: cpu_usage.map(format_cpu_usage),
+        memory_usage: memory_usage.map(format_memory_usage),
+        metric_nodes: nodes
+            .iter()
+            .filter(|node| node.cpu_usage.is_some() || node.memory_usage.is_some())
+            .count(),
+    };
     Ok(ClusterOverview {
         nodes,
+        totals,
         metrics_available,
         observed_at: Utc::now().to_rfc3339(),
     })
@@ -2176,6 +2258,17 @@ mod tests {
 
         assert!((cpu - 6.25).abs() < f64::EPSILON);
         assert!((memory - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sums_cluster_capacity_and_usage_quantities() {
+        let cpu = sum_quantities(vec![Some("4"), Some("2500m"), None], true)
+            .expect("combined CPU capacity");
+        let memory = sum_quantities(vec![Some("8Gi"), Some("512Mi")], false)
+            .expect("combined memory capacity");
+
+        assert!((cpu - 6.5).abs() < f64::EPSILON);
+        assert_eq!(format_memory_usage(memory), "8.5Gi");
     }
 
     #[test]

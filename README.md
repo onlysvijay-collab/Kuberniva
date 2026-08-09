@@ -26,12 +26,12 @@ Kuberniva is an open-source, local-first Kubernetes desktop app. It keeps cluste
 | 🗂️ **Clusters** | Add kubeconfig files or folders, merge contexts, switch clusters from the top selector, and connect lazily only when a cluster is opened. |
 | 🔐 **Authentication** | Use OIDC `exec`, OIDC auth-provider, bearer-token, and client-certificate kubeconfigs. |
 | ⭐ **Shortcuts** | Pin up to 10 clusters, rename their shortcuts, and keep them across restarts. |
-| 📊 **Overview** | See workloads, resources, node readiness, full node details, and live CPU/memory usage when Metrics API is available. |
+| 📊 **Overview** | See cluster-wide CPU, memory, and node storage totals first, then select any node for its full capacity, allocation, network, and live usage details. |
 | 🛎️ **Events** | Browse recent Kubernetes Events with warning/normal filters and search. |
 | 🧭 **Resources** | Discover built-in APIs and CRDs, including a dedicated Gateway APIs view for Gateways, HTTPRoutes, and related route types; inspect metadata, labels, endpoint addresses, ports, and properties. |
 | 📝 **Editors** | Edit ConfigMaps and Secrets as key/value data, reveal Secret values from base64 on demand, edit YAML, save, and view certificate expiry. |
 | 🚀 **Workloads** | Inspect Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs, CronJobs, Pods, and other discovered workload types. |
-| 📜 **Operations** | View sibling-pod logs, select containers, refresh every 30 seconds, preserve scroll position, open a Pod terminal, and start/stop port forwards. |
+| 📜 **Operations** | Keep workload types visible while switching sibling-pod logs, select containers, refresh every 30 seconds, preserve scroll position, open a Pod terminal, and start/stop port forwards. |
 | 🎨 **Workspace** | Use a full-window, light ivory/golden interface with a collapsible sidebar, persistent cluster context, loading states, confirmations, and actionable notifications. |
 
 ## 🏗️ Architecture

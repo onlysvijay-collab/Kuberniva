@@ -34,8 +34,9 @@
   type NodeCondition = { type: string; status: string; reason?: string; message?: string; lastHeartbeatTime?: string; lastTransitionTime?: string };
   type NodeTaint = { key: string; value?: string; effect: string; timeAdded?: string };
   type NodeOverview = { name: string; ready: boolean; roles: string[]; labels: NodeProperty[]; annotations: NodeProperty[]; addresses: NodeAddress[]; conditions: NodeCondition[]; taints: NodeTaint[]; architecture?: string; operatingSystem?: string; osImage?: string; kernelVersion?: string; kubeletVersion?: string; containerRuntimeVersion?: string; podCidrs: string[]; providerId?: string; unschedulable: boolean; uid?: string; creationTimestamp?: string; capacity: NodeProperty[]; allocatable: NodeProperty[]; cpuCapacity?: string; memoryCapacity?: string; cpuUsage?: string; memoryUsage?: string; cpuUsagePercent?: number; memoryUsagePercent?: number };
+  type ClusterTotals = { cpuCapacity?: string; memoryCapacity?: string; storageCapacity?: string; cpuUsage?: string; memoryUsage?: string; cpuUsagePercent?: number; memoryUsagePercent?: number; metricNodes: number };
   type NetworkFact = { label: string; value: string; tone: 'neutral' | 'primary' | 'external' };
-  type ClusterOverview = { nodes: NodeOverview[]; metricsAvailable: boolean; observedAt: string };
+  type ClusterOverview = { nodes: NodeOverview[]; totals: ClusterTotals; metricsAvailable: boolean; observedAt: string };
   type ClusterEvent = { name: string; namespace?: string; eventType: string; reason?: string; message?: string; involvedKind?: string; involvedName?: string; action?: string; count?: number; source?: string; firstObserved?: string; lastObserved?: string };
   type KubeContext = { name: string; cluster: string; namespace: string; authMethod: string; current: boolean; sourcePath?: string };
   type KubeconfigSummary = { contexts: KubeContext[]; currentContext?: string };
@@ -87,7 +88,7 @@
   let portForwards: PortForward[] = [];
   let syncingPortForwards = false;
   let stoppingPortForwardId = '';
-  let workloadDetailMode: 'overview' | 'terminal' = 'overview';
+  let workloadDetailMode: 'overview' | 'terminal' | 'logs' = 'overview';
   let terminalPods: ResourceObject[] = [];
   let terminalTarget: LogTarget | null = null;
   let terminalContainers: string[] = [];
@@ -218,10 +219,14 @@
     `${workload.name} ${workload.namespace || ''}`.toLowerCase().includes(workloadSearch.toLowerCase()),
   );
   $: suggestedForwardPorts = [...new Set(logPorts.map((port) => port.port))];
+  // Native listeners can remain active for another context, but the workspace
+  // must never imply they belong to the cluster currently being inspected.
+  $: activeClusterPortForwards = activeClusterId
+    ? portForwards.filter((forward) => forward.context === activeCluster)
+    : [];
   $: selectedPodPortForwards = logTarget
-    ? portForwards.filter((forward) => forward.pod === logTarget?.pod
-      && forward.namespace === logTarget?.namespace
-      && (!forward.context || forward.context === activeCluster))
+    ? activeClusterPortForwards.filter((forward) => forward.pod === logTarget?.pod
+      && forward.namespace === logTarget?.namespace)
     : [];
   $: editorLogsOpening = editorResource && editorObject
     ? isOpeningLogs(editorResource.kind, editorObject)
@@ -883,7 +888,9 @@
   function selectWorkloadResource(resource: ResourceDescriptor) {
     workloadSearch = '';
     // A resource-type switch starts a fresh workload workspace. Do not leave a
-    // Pod/deployment inspector or terminal attached to the previous type.
+    // Pod/deployment inspector, terminal, or log stream attached to the
+    // previous type.
+    closeWorkloadLogs();
     closeEditor();
     closeYamlEditor();
     relatedPods = null;
@@ -1427,6 +1434,10 @@
       openingLogsTarget = null;
       logWorkspaceGeneration += 1;
     }
+    if (workloadDetailMode === 'logs') {
+      closeLogs(false);
+      workloadDetailMode = 'overview';
+    }
     resetWorkloadTerminal();
     editorResource = null;
     editorObject = null;
@@ -1529,6 +1540,11 @@
     portForwardOpen = false;
   }
 
+  function closeWorkloadLogs() {
+    closeLogs();
+    workloadDetailMode = 'overview';
+  }
+
   async function loadLogs(reset = false) {
     if (!logTarget || loadingLogs) return;
     const requestGeneration = ++logRequestGeneration;
@@ -1583,6 +1599,10 @@
     return `${object.namespace || (namespace === 'all namespaces' ? '' : namespace)}\u0000${object.name}`;
   }
 
+  function logTargetKey(target: LogTarget) {
+    return `${target.namespace}\u0000${target.pod}`;
+  }
+
   function availableLogPods(primary: ResourceObject, candidates: ResourceObject[]) {
     const pods = new Map<string, ResourceObject>();
     [...candidates, primary].forEach((pod) => pods.set(logPodKey(pod), pod));
@@ -1634,6 +1654,11 @@
     portForwardRemotePort = '';
     portForwardLocalPort = '';
     await loadLogs(true);
+  }
+
+  function selectLogPodByKey(key: string) {
+    const pod = logPods.find((candidate) => logPodKey(candidate) === key);
+    if (pod) void selectLogPod(pod);
   }
 
   function openPortForwardForm() {
@@ -1714,9 +1739,8 @@
     closeLogs(false);
     const workspaceGeneration = logWorkspaceGeneration;
     stopOverviewRefresh();
-    // Logs are deliberately a focused workspace: no previous object editor,
-    // YAML surface, or resource list should travel with the stream.
-    closeEditor(false);
+    // Logs live in the Workloads inspector so the workload-type rail and the
+    // selected object list remain available while an operator follows a stream.
     closeYamlEditor();
     logPods = availableLogPods(object, candidates);
     logScopeLabel = scopeLabel;
@@ -1725,9 +1749,19 @@
     relatedObject = null;
     clusterPickerOpen = false;
     namespaceOpen = false;
-    activeView = 'Logs';
+    if (activeView !== 'Workloads') {
+      const podResource = catalog.resources.find((resource) => resource.category === 'Workloads' && resource.kind === 'Pod');
+      if (podResource) {
+        workloadResource = podResource;
+        workloadObjects = logPods;
+        workloadSearch = '';
+      }
+      closeEditor(false);
+      activeView = 'Workloads';
+    }
+    workloadDetailMode = 'logs';
     await selectLogPod(object);
-    if (workspaceGeneration !== logWorkspaceGeneration || activeView !== 'Logs' || !logTarget) return;
+    if (workspaceGeneration !== logWorkspaceGeneration || activeView !== 'Workloads' || !logTarget) return;
     logRefreshTimer = window.setInterval(() => loadLogs(), 30_000);
   }
 
@@ -1753,6 +1787,7 @@
     // Logs and terminal access are deliberate actions from there; a Deployment
     // is never itself a log source.
     if (activeView === 'Workloads' && resource.category === 'Workloads') {
+      closeWorkloadLogs();
       await openResourceEditor(resource, object);
       return;
     }
@@ -2120,7 +2155,7 @@
           {#if view === 'Events' && namespaceClusterEvents.length}<span class="count">{namespaceClusterEvents.length}</span>{/if}
           {#if view === 'Workloads' && workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}
           {#if view === 'Resources'}<span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span>{/if}
-          {#if view === 'Port forwards'}<span class:port-forward-count-active={portForwards.length > 0} class="count">{portForwards.length}</span>{/if}
+          {#if view === 'Port forwards'}<span class:port-forward-count-active={activeClusterPortForwards.length > 0} class="count">{activeClusterPortForwards.length}</span>{/if}
         </button>
       {/each}
     </nav>
@@ -2306,10 +2341,18 @@
           <section class="cluster-hero">
             <div class="cluster-hero-mark"><img class="brand-mark" src="/kuberniva-mark.png" alt="" /></div>
             <div class="cluster-hero-copy"><p class="eyebrow">Cluster overview</p><h2>{activeCluster}</h2><p>Live node capacity and usage. Metrics refresh at most once a minute while this page is open.</p></div>
-            <div class="overview-summary"><div><strong>{clusterOverview.nodes.length}</strong><span>Nodes</span></div><div><strong>{readyNodeCount}</strong><span>Ready</span></div><div><strong>{clusterOverview.metricsAvailable ? 'Live' : 'Unavailable'}</strong><span>Metrics API</span></div></div>
+            <div class="overview-summary"><div><strong>{clusterOverview.nodes.length}</strong><span>Nodes</span></div><div><strong>{readyNodeCount}</strong><span>Ready</span></div><div><strong>{clusterOverview.metricsAvailable ? `${clusterOverview.totals.metricNodes}/${clusterOverview.nodes.length}` : '—'}</strong><span>Metrics nodes</span></div></div>
           </section>
           <section class="node-overview panel">
-            <div class="panel-heading"><div><p class="eyebrow">Infrastructure</p><h2>Nodes</h2><p>{clusterOverview.metricsAvailable ? 'Current CPU and memory are supplied by the Kubernetes Metrics API.' : 'The cluster does not expose the Metrics API; capacity remains available.'}</p></div><div class="overview-actions"><small>Updated {new Date(clusterOverview.observedAt).toLocaleTimeString()}</small></div></div>
+            <div class="panel-heading"><div><p class="eyebrow">Infrastructure</p><h2>Nodes</h2><p>Cluster-wide capacity first. Select any node below for its exact usage, allocation, network, and runtime details.</p></div><div class="overview-actions"><small>Updated {new Date(clusterOverview.observedAt).toLocaleTimeString()}</small></div></div>
+            <section class="cluster-capacity-overview" aria-label="Cluster capacity summary">
+              <div class="cluster-capacity-heading"><div><strong>Cluster capacity</strong><small>{clusterOverview.metricsAvailable ? `${clusterOverview.totals.metricNodes} of ${clusterOverview.nodes.length} nodes reporting live CPU and memory` : 'Live usage is unavailable; total capacity remains visible.'}</small></div><span>{clusterOverview.metricsAvailable ? 'Live metrics' : 'Capacity only'}</span></div>
+              <div class="cluster-capacity-grid">
+                <section class="cluster-capacity-card cluster-capacity-cpu"><div class="cluster-capacity-card-heading"><span>CPU</span><strong>{clusterOverview.totals.cpuUsage || '—'}</strong><b>{usagePercentLabel(clusterOverview.totals.cpuUsagePercent)}</b></div>{#if clusterOverview.totals.cpuUsagePercent !== undefined}<div class="usage-meter" aria-label={`Cluster CPU ${usagePercentLabel(clusterOverview.totals.cpuUsagePercent)}`}><i style:width={`${clusterOverview.totals.cpuUsagePercent}%`}></i></div>{/if}<small>{clusterOverview.totals.cpuUsage ? `${clusterOverview.totals.cpuUsage} used of ${clusterOverview.totals.cpuCapacity || 'unknown capacity'} · ${remainingPercentLabel(clusterOverview.totals.cpuUsagePercent)}` : `Total capacity ${clusterOverview.totals.cpuCapacity || 'unavailable'}`}</small></section>
+                <section class="cluster-capacity-card cluster-capacity-memory"><div class="cluster-capacity-card-heading"><span>Memory</span><strong>{clusterOverview.totals.memoryUsage || '—'}</strong><b>{usagePercentLabel(clusterOverview.totals.memoryUsagePercent)}</b></div>{#if clusterOverview.totals.memoryUsagePercent !== undefined}<div class="usage-meter memory-meter" aria-label={`Cluster memory ${usagePercentLabel(clusterOverview.totals.memoryUsagePercent)}`}><i style:width={`${clusterOverview.totals.memoryUsagePercent}%`}></i></div>{/if}<small>{clusterOverview.totals.memoryUsage ? `${clusterOverview.totals.memoryUsage} used of ${clusterOverview.totals.memoryCapacity || 'unknown capacity'} · ${remainingPercentLabel(clusterOverview.totals.memoryUsagePercent)}` : `Total capacity ${clusterOverview.totals.memoryCapacity || 'unavailable'}`}</small></section>
+                <section class="cluster-capacity-card cluster-capacity-storage"><div class="cluster-capacity-card-heading"><span>Node storage</span><strong>{clusterOverview.totals.storageCapacity || '—'}</strong></div><small>Total ephemeral storage advertised by all cluster nodes.</small></section>
+              </div>
+            </section>
             {#if clusterOverview.nodes.length === 0}
               <div class="node-empty">No Nodes were returned by this cluster.</div>
             {:else}
@@ -2453,15 +2496,15 @@
         </section>
       {:else if activeView === 'Port forwards'}
         <section class="port-forwards-page panel">
-          <div class="port-forwards-heading"><div class="port-forwards-heading-mark"><Cable size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Local listeners</p><h2>Port forwarding</h2><p>Every listener below is active in Kuberniva’s native process and remains available until you stop it or quit the app.</p></div><div class:port-forward-summary-active={portForwards.length > 0} class="port-forward-summary"><span class="port-forward-listening-dot"></span><strong>{portForwards.length}</strong><small>{portForwards.length === 1 ? 'active listener' : 'active listeners'}</small></div><button class="secondary port-forward-refresh" disabled={syncingPortForwards} on:click={() => syncPortForwards(true)}><RefreshCw size={15} class={syncingPortForwards ? 'animate-spin' : ''} />{syncingPortForwards ? 'Checking…' : 'Check status'}</button></div>
-          {#if syncingPortForwards && portForwards.length === 0}
+          <div class="port-forwards-heading"><div class="port-forwards-heading-mark"><Cable size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Local listeners</p><h2>Port forwarding</h2><p>Listeners shown here belong only to {activeClusterId ? activeCluster : 'the selected cluster'} and remain active until you stop them or quit Kuberniva.</p></div><div class:port-forward-summary-active={activeClusterPortForwards.length > 0} class="port-forward-summary"><span class="port-forward-listening-dot"></span><strong>{activeClusterPortForwards.length}</strong><small>{activeClusterPortForwards.length === 1 ? 'active listener' : 'active listeners'}</small></div><button class="secondary port-forward-refresh" disabled={syncingPortForwards} on:click={() => syncPortForwards(true)}><RefreshCw size={15} class={syncingPortForwards ? 'animate-spin' : ''} />{syncingPortForwards ? 'Checking…' : 'Check status'}</button></div>
+          {#if syncingPortForwards && activeClusterPortForwards.length === 0}
             <div class="port-forward-page-state"><RefreshCw size={21} class="animate-spin" /><strong>Checking native listeners…</strong></div>
-          {:else if portForwards.length === 0}
-            <div class="port-forward-page-empty"><span><Cable size={24} strokeWidth={1.7} /></span><h3>No active port forwards</h3><p>Open a Pod’s logs and choose <strong>Forward</strong>. Active listeners will appear here immediately.</p><button class="primary" on:click={() => navigateTo('Workloads')}>Browse workloads</button></div>
+          {:else if activeClusterPortForwards.length === 0}
+            <div class="port-forward-page-empty"><span><Cable size={24} strokeWidth={1.7} /></span><h3>No active port forwards for this cluster</h3><p>Open a Pod’s logs and choose <strong>Forward</strong>. Only listeners from {activeClusterId ? activeCluster : 'the selected cluster'} appear here.</p><button class="primary" on:click={() => navigateTo('Workloads')}>Browse workloads</button></div>
           {:else}
             <div class="port-forward-table" role="table" aria-label="Active port forwards">
               <div class="port-forward-table-header" role="row"><span>Status</span><span>Local listener</span><span>Pod target</span><span>Cluster context</span><span>Action</span></div>
-              {#each portForwards as forward}
+              {#each activeClusterPortForwards as forward}
                 <div class="port-forward-table-row" role="row"><div class="port-forward-status"><span class="port-forward-listening-dot"></span><strong>Listening</strong></div><div class="port-forward-endpoint"><strong>{forward.localAddress}</strong><small>localhost:{forward.localPort}</small></div><div class="port-forward-endpoint"><strong>{forward.namespace}/{forward.pod}</strong><small>Remote port {forward.remotePort}</small></div><div class="port-forward-context"><strong>{forward.context || 'Current context'}</strong><small>Native Kubernetes tunnel</small></div><button class="port-forward-stop" disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop forward'}</button></div>
               {/each}
             </div>
@@ -2472,7 +2515,7 @@
           <section class="empty-view"><div class="explore-orbit"><i></i><i></i><b>▦</b></div><h2>Select a cluster first</h2><p>Workload inventory is loaded only for the cluster and namespace you choose.</p></section>
         {:else}
           <section class="workloads-page font-sans">
-            <div class:workload-detail-open={editorResource?.category === 'Workloads' && editorObject !== null} class="workload-grid grid min-h-[560px]">
+            <div class:workload-detail-open={(editorResource?.category === 'Workloads' && editorObject !== null) || (workloadDetailMode === 'logs' && logTarget !== null)} class:workload-logs-open={workloadDetailMode === 'logs' && logTarget !== null} class="workload-grid grid min-h-[560px]">
               <aside class="workload-type-rail" aria-label="Workload resource types">
                 <div class="workload-type-heading"><div><strong>Workload types</strong><small>Loaded on demand</small></div><b>{workloadResources.length}</b></div>
                 <div class="workload-type-list">
@@ -2507,7 +2550,19 @@
                   </div>
                 {/if}
               </div>
-              {#if editorResource && editorObject && editorResource.category === 'Workloads'}
+              {#if workloadDetailMode === 'logs' && logTarget}
+                <aside class="workload-inspector workload-log-inspector" aria-label={`${logTarget.pod} logs`}>
+                  <div class="workload-inspector-heading workload-log-heading"><div><p class="eyebrow">Live logs</p><h3>{logTarget.pod}</h3><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="workload-inspector-actions"><button class="secondary workload-log-back" on:click={closeWorkloadLogs}>← Details</button><button aria-label="Close logs" on:click={closeWorkloadLogs}>×</button></div></div>
+                  <div class="workload-log-body">
+                    <section class="workload-log-pod-picker"><div><div><strong>Pod stream</strong><small>{logPods.length} available for this workload</small></div><label>Switch Pod<select value={logTargetKey(logTarget)} on:change={(event) => selectLogPodByKey(event.currentTarget.value)}>{#each logPods as pod}<option value={logPodKey(pod)}>{pod.name} · {pod.namespace || namespace}</option>{/each}</select></label></div></section>
+                    <section class="workload-log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first stream…' : loadingLogs ? 'Refreshing…' : 'Refreshes every 30 seconds · scroll up to hold your place'}</small></div><div class="workload-log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class:port-forward-open={portForwardOpen} class="port-forward-button" on:click={openPortForwardForm}>⇄ Forward</button></div></section>
+                    {#if logPorts.length}<section class="workload-log-ports"><strong>Container ports</strong><div>{#each logPorts as port}<span title={`${port.container}${port.name ? ` · ${port.name}` : ''} · ${port.protocol}`}>{port.port}/{port.protocol}<small>{port.container}</small></span>{/each}</div></section>{/if}
+                    {#if portForwardOpen}<section class="port-forward-form workload-log-forward-form"><div><strong>Port forward</strong><button aria-label="Close port forward" on:click={() => (portForwardOpen = false)}>×</button></div><p>Expose {logTarget.pod} only on this Mac.</p><label>Remote port<input list="kuberniva-pod-ports" type="number" min="1" max="65535" bind:value={portForwardRemotePort} placeholder="e.g. 8080" /></label><datalist id="kuberniva-pod-ports">{#each suggestedForwardPorts as port}<option value={port}></option>{/each}</datalist><label>Local port<input type="number" min="1" max="65535" bind:value={portForwardLocalPort} placeholder="e.g. 8080" /></label><button class="primary" disabled={portForwarding} on:click={startPortForward}>{portForwarding ? 'Starting…' : 'Start forward'}</button></section>{/if}
+                    {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Active forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>Local → {forward.remotePort}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
+                    {#if loadingLogs && logLines.length === 0}<div class="workload-log-opening"><RefreshCw size={18} class="animate-spin" /><div><strong>Opening logs…</strong><small>Connecting to {logTarget.pod}{selectedLogContainer ? ` · ${selectedLogContainer}` : ''}</small></div></div>{:else}<pre bind:this={logViewport} class="workload-log-output">{logLines.length ? logLines.join('\n') : 'No log lines returned yet.'}</pre>{/if}
+                  </div>
+                </aside>
+              {:else if editorResource && editorObject && editorResource.category === 'Workloads'}
                 <aside class="workload-inspector" aria-label="Workload details">
                   <div class="workload-inspector-heading"><div><p class="eyebrow">Live workload details</p><h3>{editorObject.name}</h3><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div><div class="workload-inspector-actions"><button class="workload-delete" disabled={loadingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button><button aria-label="Close workload details" on:click={() => closeEditor()}>×</button></div></div>
                   {#if loadingEditor}
@@ -2527,7 +2582,7 @@
                     </section>
                   {:else}
                     <div class="workload-inspector-body">
-                      <section class="workload-action-grid"><button class:workload-action-loading={editorLogsOpening} class="workload-action-card workload-logs-action" disabled={Boolean(openingLogsTarget)} aria-busy={editorLogsOpening} on:click={() => openWorkloadLogs(editorResource!, editorObject!)}><span>{#if editorLogsOpening}<RefreshCw size={18} class="workload-action-spinner" />{:else}≡{/if}</span><div><strong>{editorLogsOpening ? 'Opening logs…' : 'View logs'}</strong><small>{editorLogsOpening ? `Preparing ${editorResource.kind} logs and the first live stream` : editorResource.kind === 'Pod' ? 'Open this Pod in the full log workspace' : 'Choose a live Pod and stream its output'}</small></div><b>{editorLogsOpening ? '•••' : '→'}</b></button><button class="workload-action-card workload-terminal-action" disabled={loadingTerminalPods || Boolean(openingLogsTarget)} on:click={() => openWorkloadTerminal(editorResource!, editorObject!)}><span>⌘</span><div><strong>Terminal</strong><small>Tunnel into a Pod container with Kubernetes exec</small></div><b>→</b></button></section>
+                      <section class="workload-action-grid"><button class:workload-action-loading={editorLogsOpening} class="workload-action-card workload-logs-action" disabled={Boolean(openingLogsTarget)} aria-busy={editorLogsOpening} on:click={() => openWorkloadLogs(editorResource!, editorObject!)}><span>{#if editorLogsOpening}<RefreshCw size={18} class="workload-action-spinner" />{:else}≡{/if}</span><div><strong>{editorLogsOpening ? 'Opening logs…' : 'View logs'}</strong><small>{editorLogsOpening ? `Preparing ${editorResource.kind} logs and the first live stream` : editorResource.kind === 'Pod' ? 'Keep workload types visible beside this Pod stream' : 'Choose a live Pod and stream its output without leaving Workloads'}</small></div><b>{editorLogsOpening ? '•••' : '→'}</b></button><button class="workload-action-card workload-terminal-action" disabled={loadingTerminalPods || Boolean(openingLogsTarget)} on:click={() => openWorkloadTerminal(editorResource!, editorObject!)}><span>⌘</span><div><strong>Terminal</strong><small>Tunnel into a Pod container with Kubernetes exec</small></div><b>→</b></button></section>
                       <section class="workload-status-grid"><div><span>Replicas</span><strong>{workloadReplicaSummary(editorManifest)}</strong></div><div><span>API</span><strong>{editorResource.apiVersion}</strong></div></section>
                       {#if editorResource.kind === 'Pod'}<section class="workload-pod-facts"><div><span>Phase</span><strong class={`workload-status-label ${workloadStatusTone(editorObject)}`}>{workloadStatusLabel(editorObject)}</strong></div><div><span>Containers</span><strong>{podContainerSummary(editorObject)}</strong></div><div><span>Restarts</span><strong>{editorObject.restarts ?? 0}</strong></div><div><span>Age</span><strong>{resourceAge(editorObject.createdAt)}</strong></div>{#if editorObject.cpuUsage}<div><span>CPU used</span><strong>{editorObject.cpuUsage}</strong></div>{/if}{#if editorObject.memoryUsage}<div><span>Memory used</span><strong>{editorObject.memoryUsage}</strong></div>{/if}{#if editorObject.nodeName}<div class="workload-pod-fact-wide"><span>Node</span><strong>{editorObject.nodeName}</strong></div>{/if}</section>{/if}
                       <section class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>Container images</strong><small>Images declared on the Pod template</small></div><b>{workloadImages(editorManifest).length}</b></div>{#if workloadImages(editorManifest).length}<div class="workload-image-list">{#each workloadImages(editorManifest) as container}<div><span>{container.init ? 'Init' : 'App'}</span><strong>{container.name}</strong><small title={container.image}>{container.image}</small></div>{/each}</div>{:else}<p>No container image is declared on this resource.</p>{/if}</section>

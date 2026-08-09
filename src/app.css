@@ -2425,3 +2425,89 @@ main {
     box-shadow: -16px 0 34px rgba(41, 51, 75, .18);
   }
 }
+
+/* Logs stay inside Workloads: the left type rail remains the operator's
+   primary switcher, while the right inspector trades details for a live
+   Pod stream. */
+.workload-grid.workload-logs-open {
+  grid-template-columns: 178px minmax(260px, .78fr) minmax(370px, 1.22fr);
+}
+.workload-log-inspector {
+  border-color: #c9e0dc;
+  background: linear-gradient(145deg, #fffefb, #f7fbfa 58%, #f6f7ff);
+}
+.workload-log-heading { border-bottom-color: #dbe8e5; }
+.workload-log-back { min-height: 28px; padding: 0 8px; font-size: 9px; font-weight: 750; }
+.workload-log-body { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.workload-log-pod-picker { flex: 0 0 auto; display: grid; gap: 8px; padding: 11px 14px 10px; border-bottom: 1px solid #e0e8e5; background: #fbfcfa; }
+.workload-log-pod-picker > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.workload-log-pod-picker > div > div { min-width: 0; display: grid; gap: 3px; }
+.workload-log-pod-picker strong { color: #3d4e62; font-size: 11px; }
+.workload-log-pod-picker small { color: #7b8999; font-size: 9px; }
+.workload-log-pod-picker label { min-width: 0; display: flex; align-items: center; gap: 7px; color: #68788b; font-size: 9px; font-weight: 750; white-space: nowrap; }
+.workload-log-pod-picker select { width: min(270px, 48vw); height: 30px; min-width: 0; border: 1px solid #cfdedc; border-radius: 7px; outline: 0; color: #3e5b60; background: #fff; font-family: "DM Mono", monospace; font-size: 9px; padding: 0 7px; }
+.workload-log-pod-picker select:focus { border-color: #7abbb2; box-shadow: 0 0 0 3px rgba(68, 170, 160, .11); }
+.workload-log-toolbar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #e0e8e5; background: #f4f8f7; }
+.workload-log-toolbar > div:first-child { min-width: 0; display: grid; gap: 2px; }
+.workload-log-toolbar strong { color: #425368; font-size: 11px; }
+.workload-log-toolbar small { overflow: hidden; color: #788899; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.workload-log-toolbar-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
+.workload-log-toolbar label { display: flex; align-items: center; gap: 5px; color: #68788b; font-size: 9px; font-weight: 700; }
+.workload-log-toolbar select { max-width: 130px; height: 27px; border: 1px solid #d7e1e3; border-radius: 6px; outline: 0; color: #4c6071; background: #fff; font-family: "DM Mono", monospace; font-size: 9px; }
+.workload-log-ports { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid #e0e8e5; color: #657689; background: #fffdf9; }
+.workload-log-ports > strong { flex: 0 0 auto; color: #778598; font-size: 8px; letter-spacing: .07em; text-transform: uppercase; }
+.workload-log-ports > div { display: flex; gap: 5px; min-width: 0; overflow: auto; }
+.workload-log-ports span { display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px; border: 1px solid #d8e9e5; border-radius: 5px; color: #2f837a; background: #effaf7; font-family: "DM Mono", monospace; font-size: 8px; white-space: nowrap; }
+.workload-log-ports span small { color: #6e9691; font-size: 8px; }
+.workload-log-forward-form { max-height: 260px; overflow: auto; }
+.workload-log-body .log-active-forwards { flex: 0 0 auto; }
+.workload-log-opening { min-height: 0; flex: 1; display: grid; place-content: center; grid-template-columns: 24px minmax(0, 240px); align-items: center; gap: 9px; padding: 22px; color: #6c7c8c; background: #111924; }
+.workload-log-opening > svg { color: #5bd1c5; }
+.workload-log-opening > div { display: grid; gap: 3px; }
+.workload-log-opening strong { color: #eaf2f1; font-size: 12px; }
+.workload-log-opening small { overflow: hidden; color: #9dabb9; font-family: "DM Mono", monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.workload-log-output { min-width: 0; min-height: 0; flex: 1; overflow: auto; margin: 0; padding: 15px; color: #d5e1e3; background: #111924; font-family: "DM Mono", monospace; font-size: 11px; line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-gutter: stable; }
+
+@container workload-page (max-width: 1280px) {
+  .workload-grid.workload-logs-open { grid-template-columns: 164px minmax(245px, .75fr) minmax(340px, 1.25fr); }
+  .workload-logs-open .workload-type-rail { display: flex; }
+}
+@container workload-page (max-width: 1050px) {
+  .workload-grid.workload-logs-open { grid-template-columns: 154px minmax(0, 1fr); }
+  .workload-logs-open .workload-log-inspector { position: absolute; inset: 0 0 0 166px; z-index: 12; box-shadow: -16px 0 34px rgba(41, 51, 75, .18); }
+  .workload-logs-open .workload-type-rail { display: flex; }
+}
+@container workload-page (max-width: 620px) {
+  .workload-grid.workload-logs-open { grid-template-columns: 132px minmax(0, 1fr); }
+  .workload-logs-open .workload-log-inspector { left: 142px; }
+  .workload-log-toolbar { align-items: stretch; flex-direction: column; }
+  .workload-log-toolbar-actions { justify-content: space-between; }
+  .workload-log-pod-picker > div { align-items: stretch; flex-direction: column; }
+  .workload-log-pod-picker label, .workload-log-pod-picker select { width: 100%; }
+}
+
+/* Cluster capacity is intentionally separate from per-node details: it gives
+   an immediate total, then the existing Node inspector explains each member. */
+.cluster-capacity-overview { flex: 0 0 auto; margin: 0 20px 14px; padding: 13px; border: 1px solid #e3ded2; border-radius: 12px; background: linear-gradient(120deg, #fffdf8 0%, #fffaf0 54%, #f6fbfa 100%); box-shadow: 0 8px 18px rgba(66, 73, 89, .045); }
+.cluster-capacity-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.cluster-capacity-heading > div { min-width: 0; display: grid; gap: 3px; }
+.cluster-capacity-heading strong { color: #39485d; font-size: 13px; }
+.cluster-capacity-heading small { overflow: hidden; color: #7e8a99; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+.cluster-capacity-heading > span { flex: 0 0 auto; padding: 4px 7px; border: 1px solid #cbe6df; border-radius: 999px; color: #287b72; background: #ecf8f5; font-family: "DM Mono", monospace; font-size: 8px; font-weight: 750; }
+.cluster-capacity-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(150px, .7fr); gap: 9px; }
+.cluster-capacity-card { min-width: 0; display: grid; gap: 7px; padding: 11px; border: 1px solid #dedaf8; border-radius: 10px; background: linear-gradient(135deg, #f7f5ff, #fff); }
+.cluster-capacity-card.cluster-capacity-memory { border-color: #cfe7e1; background: linear-gradient(135deg, #edf9f6, #fff); }
+.cluster-capacity-card.cluster-capacity-storage { border-color: #eadfc1; background: linear-gradient(135deg, #fff9eb, #fff); }
+.cluster-capacity-card-heading { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 5px 8px; }
+.cluster-capacity-card-heading span { color: #68758a; font-size: 8.5px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.cluster-capacity-card-heading strong { grid-row: 2; overflow: hidden; color: #35445c; font-family: "DM Mono", monospace; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.cluster-capacity-card-heading b { grid-column: 2; grid-row: 2; color: #655ad0; font-family: "DM Mono", monospace; font-size: 8.5px; font-weight: 650; white-space: nowrap; }
+.cluster-capacity-memory .cluster-capacity-card-heading b { color: #2f8b80; }
+.cluster-capacity-card small { overflow: hidden; color: #7c899a; font-family: "DM Mono", monospace; font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.cluster-capacity-card .usage-meter { height: 7px; background: #e3e1f3; }
+.cluster-capacity-memory .usage-meter { background: #dcefeb; }
+@media (max-width: 900px) {
+  .cluster-capacity-grid { grid-template-columns: 1fr; }
+  .cluster-capacity-heading { align-items: flex-start; }
+  .cluster-capacity-heading small { white-space: normal; }
+}
