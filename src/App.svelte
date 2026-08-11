@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { Window as TauriWindow } from '@tauri-apps/api/window';
-  import { Bell, Boxes, Cable, ChevronRight, Command, Container, Database, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, RefreshCw, Search, ScrollText, Settings2, Star, Workflow } from '@lucide/svelte';
+  import { Bell, Boxes, Cable, ChevronDown, ChevronRight, Command, Container, Database, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, Moon, RefreshCw, Search, ScrollText, Settings2, Star, Sun, Terminal, Workflow } from '@lucide/svelte';
 
-  type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'Port forwards' | 'Settings';
+  type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'CLI' | 'Port forwards' | 'Settings';
+  type ThemeMode = 'light' | 'dark';
   type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Gateway APIs' | 'Storage' | 'Cluster' | 'Custom Resources';
   type ResourceDescriptor = { group: string; version: string; apiVersion: string; kind: string; plural: string; namespaced: boolean; category: ResourceCategory; custom: boolean; crd: boolean };
   type ClusterCatalog = { context: string; namespaces: string[]; resources: ResourceDescriptor[] };
@@ -40,9 +41,13 @@
   type ClusterEvent = { name: string; namespace?: string; eventType: string; reason?: string; message?: string; involvedKind?: string; involvedName?: string; action?: string; count?: number; source?: string; firstObserved?: string; lastObserved?: string };
   type KubeContext = { name: string; cluster: string; namespace: string; authMethod: string; current: boolean; sourcePath?: string };
   type KubeconfigSummary = { contexts: KubeContext[]; currentContext?: string };
+  type KubeconfigInputMode = 'file' | 'folder' | 'paste';
   type Cluster = { id: string; name: string; provider: string; status: string; tone: string; authMethod?: string; namespace?: string; kubeconfigPath?: string; sourceId?: string };
+  type GlobalSearchResult = { type: 'resource' | 'object'; resource: ResourceDescriptor; object?: ResourceObject; title: string; detail: string };
+  type KubeCliResponse = { stdout: string; stderr: string; exitCode?: number; success: boolean };
+  type ResourceWatchSignal = { watchId: string; action: string; error?: string };
   type ClusterSession = { namespace: string; selectedCategory: ResourceCategory | 'All resources'; resourceSearch: string; workloadResource: ResourceDescriptor | null; workloadObjects: ResourceObject[]; workloadSearch: string; clusterOverview: ClusterOverview | null };
-  type PersistedWorkspace = { version: 5; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string> };
+  type PersistedWorkspace = { version: 6; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string>; theme?: ThemeMode };
   type DeletionTarget =
     | { type: 'resource'; resource: ResourceDescriptor; object: ResourceObject }
     | { type: 'cluster'; cluster: Cluster };
@@ -54,13 +59,23 @@
   let namespaceOpen = false;
   let clusterPickerOpen = false;
   let commandOpen = false;
+  let commandQuery = '';
+  let globalSearchResults: GlobalSearchResult[] = [];
   let kubeconfigOpen = false;
+  let kubeconfigInputMode: KubeconfigInputMode = 'file';
   let kubeconfigPath = '';
+  let pastedKubeconfig = '';
   let kubeconfigSources: string[] = [];
   let sourceConfigured = false;
   let restoringWorkspace = true;
   let resourceSearch = '';
   let selectedCategory: ResourceCategory | 'All resources' = 'All resources';
+  let resourceCategoryMoreOpen = false;
+  let sidebarWorkloadMenuOpen = false;
+  let sidebarResourceMenuOpen = false;
+  let sidebarResourceSearch = '';
+  let sidebarResourceCategory: ResourceCategory | 'All resources' = 'All resources';
+  let theme: ThemeMode = 'light';
   let loadingCatalog = false;
   let selectedResource: ResourceDescriptor | null = null;
   let resourceObjects: ResourceObject[] = [];
@@ -99,6 +114,10 @@
   let loadingTerminalPods = false;
   let loadingTerminalRuntime = false;
   let runningTerminalCommand = false;
+  let cliCommand = 'kubectl get pods';
+  let cliOutput = '';
+  let runningCli = false;
+  let cliShellMode = false;
   let editorResource: ResourceDescriptor | null = null;
   let editorObject: ResourceObject | null = null;
   let editorManifest: Record<string, unknown> | null = null;
@@ -140,7 +159,16 @@
   let clusterOverview: ClusterOverview | null = null;
   let overviewError = '';
   let loadingOverview = false;
+  let overviewRequestGeneration = 0;
+  let eventsRequestGeneration = 0;
+  let refreshingCluster = false;
   let overviewRefreshTimer: ReturnType<typeof window.setInterval> | undefined;
+  let resourceWatchId = '';
+  let resourceWatchKey = '';
+  let resourceWatchGeneration = 0;
+  let resourceWatchRefreshTimer: ReturnType<typeof window.setTimeout> | undefined;
+  let resourceWatchUnlisten: (() => void) | undefined;
+  let resourceWatchErrorNotified = false;
   let relatedObject: ResourceObject | null = null;
   let yamlResource: ResourceDescriptor | null = null;
   let yamlObject: ResourceObject | null = null;
@@ -162,8 +190,11 @@
   const clusterSessionCache = new Map<string, ClusterSession>();
   const resourceObjectCache = new Map<string, ResourceObject[]>();
   const workspaceStorageKey = 'kuberniva.workspace.v1';
+  const themeStorageKey = 'kuberniva.theme.v1';
 
   const resourceCategories: ResourceCategory[] = ['Configuration', 'Access Control', 'Network', 'Gateway APIs', 'Storage', 'Cluster', 'Custom Resources'];
+  const primaryResourceCategories = resourceCategories.slice(0, 4);
+  const overflowResourceCategories = resourceCategories.slice(4);
   let clusters: Cluster[] = [];
   let catalog: ClusterCatalog = { context: '', namespaces: [], resources: [] };
 
@@ -183,11 +214,17 @@
   $: resourceWorkspaceResources = catalog.resources.filter((resource) => resource.category !== 'Workloads');
   $: visibleResources = resourceWorkspaceResources.filter((resource) =>
     (selectedCategory === 'All resources' || resource.category === selectedCategory) &&
-    `${resource.kind} ${resource.plural} ${resource.group}`.toLowerCase().includes(resourceSearch.toLowerCase()),
+    resourceSearchText(resource).includes(resourceSearch.toLowerCase()),
   ).sort((left, right) => left.kind.localeCompare(right.kind));
+  $: sidebarVisibleResources = resourceWorkspaceResources.filter((resource) =>
+    (sidebarResourceCategory === 'All resources' || resource.category === sidebarResourceCategory) &&
+    resourceSearchText(resource).includes(sidebarResourceSearch.toLowerCase()),
+  ).sort((left, right) => left.category.localeCompare(right.category) || left.kind.localeCompare(right.kind));
+  $: globalSearchResults = buildGlobalSearchResults(commandQuery, resourceWorkspaceResources, selectedResource, resourceObjects, workloadResource, workloadObjects);
+  $: overflowResourceCategorySelected = overflowResourceCategories.includes(selectedCategory as ResourceCategory);
   $: categoryCounts = Object.fromEntries(resourceCategories.map((category) => [category, resourceWorkspaceResources.filter((resource) => resource.category === category).length]));
-  $: showClusterWorkspaceControls = Boolean(activeClusterId) && ['Overview', 'Events', 'Resources', 'Workloads', 'Logs'].includes(activeView);
-  $: refreshingCurrentView = activeView === 'Overview'
+  $: showClusterWorkspaceControls = Boolean(activeClusterId) && ['Overview', 'Events', 'Resources', 'Workloads', 'Logs', 'CLI'].includes(activeView);
+  $: refreshingCurrentView = refreshingCluster || loadingCatalog || (activeView === 'Overview'
     ? loadingOverview
     : activeView === 'Events'
       ? loadingEvents
@@ -197,7 +234,7 @@
           ? loadingWorkloads
           : activeView === 'Logs'
             ? loadingLogs
-            : false;
+            : false);
   $: namespaceControlBusy = loadingCatalog
     || (activeView === 'Resources' && loadingObjects)
     || (activeView === 'Workloads' && loadingWorkloads)
@@ -303,7 +340,7 @@
     try {
       if (activeClusterId) persistedClusterNamespaces = { ...persistedClusterNamespaces, [activeClusterId]: namespace };
       const workspace: PersistedWorkspace = {
-        version: 5,
+        version: 6,
         sourceConfigured,
         kubeconfigPath,
         kubeconfigPaths: kubeconfigSources,
@@ -321,6 +358,7 @@
               return label ? [[id, label]] : [];
             }),
         ),
+        theme,
       };
       window.localStorage.setItem(workspaceStorageKey, JSON.stringify(workspace));
     } catch {
@@ -343,9 +381,10 @@
         clusterNamespaces?: unknown;
         favoriteClusterIds?: unknown;
         favoriteClusterNames?: unknown;
+        theme?: unknown;
       };
-      if ((parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || typeof parsed.sourceConfigured !== 'boolean' || typeof parsed.kubeconfigPath !== 'string') return null;
-      const kubeconfigPaths = (parsed.version === 2 || parsed.version === 3 || parsed.version === 4 || parsed.version === 5) && Array.isArray(parsed.kubeconfigPaths)
+      if ((parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5 && parsed.version !== 6) || typeof parsed.sourceConfigured !== 'boolean' || typeof parsed.kubeconfigPath !== 'string') return null;
+      const kubeconfigPaths = (parsed.version === 2 || parsed.version === 3 || parsed.version === 4 || parsed.version === 5 || parsed.version === 6) && Array.isArray(parsed.kubeconfigPaths)
         ? [...new Set(parsed.kubeconfigPaths.filter((path): path is string => typeof path === 'string').map((path) => path.trim()))]
         : [parsed.kubeconfigPath.trim()];
       const cachedClusters = Array.isArray(parsed.clusters)
@@ -376,7 +415,7 @@
         ? Object.fromEntries(Object.entries(parsed.favoriteClusterNames).filter(([id, label]) => favoriteClusterIds.includes(id) && typeof label === 'string' && label.trim()).map(([id, label]) => [id, String(label).trim().slice(0, 80)]))
         : {};
       const workspace: PersistedWorkspace = {
-        version: 5,
+        version: 6,
         sourceConfigured: parsed.sourceConfigured,
         kubeconfigPath: parsed.kubeconfigPath,
         kubeconfigPaths: kubeconfigPaths.length ? kubeconfigPaths : [''],
@@ -386,11 +425,20 @@
         clusterNamespaces,
         favoriteClusterIds,
         favoriteClusterNames,
+        theme: parsed.theme === 'dark' ? 'dark' : 'light',
       };
       window.localStorage.setItem(workspaceStorageKey, JSON.stringify(workspace));
       return workspace;
     } catch {
       return null;
+    }
+  }
+
+  function loadThemePreference(): ThemeMode {
+    try {
+      return window.localStorage.getItem(themeStorageKey) === 'dark' ? 'dark' : 'light';
+    } catch {
+      return 'light';
     }
   }
 
@@ -484,6 +532,7 @@
       restoringWorkspace = false;
       return;
     }
+    applyTheme(workspace.theme || 'light');
     kubeconfigPath = workspace.kubeconfigPath;
     kubeconfigSources = workspace.kubeconfigPaths;
     sourceConfigured = workspace.sourceConfigured;
@@ -532,15 +581,115 @@
     overviewRefreshTimer = undefined;
   }
 
+  function stopLiveObjectRefresh() {
+    resourceWatchGeneration += 1;
+    if (resourceWatchRefreshTimer) window.clearTimeout(resourceWatchRefreshTimer);
+    resourceWatchRefreshTimer = undefined;
+    const watchId = resourceWatchId;
+    resourceWatchId = '';
+    resourceWatchKey = '';
+    resourceWatchErrorNotified = false;
+    if (watchId && '__TAURI_INTERNALS__' in window) {
+      void import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('stop_resource_watch', { watchId }))
+        .catch(() => undefined);
+    }
+  }
+
+  function startLiveObjectRefresh() {
+    stopLiveObjectRefresh();
+    if (!activeClusterId || !['Workloads', 'Resources'].includes(activeView)) return;
+    const resource = activeView === 'Workloads' ? workloadResource : selectedResource;
+    if (resource) void startResourceWatch(resource);
+  }
+
+  function resourceWatchRequest(resource: ResourceDescriptor) {
+    return {
+      kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
+      context: activeCluster,
+      group: resource.group,
+      version: resource.version,
+      kind: resource.kind,
+      plural: resource.plural,
+      namespaced: resource.namespaced,
+      namespace,
+    };
+  }
+
+  async function startResourceWatch(resource: ResourceDescriptor) {
+    if (!activeClusterId || !('__TAURI_INTERNALS__' in window)) return;
+    const watchGeneration = resourceWatchGeneration;
+    const requestClusterId = activeClusterId;
+    const requestNamespace = namespace;
+    const nextWatchKey = `${requestClusterId}\u0000${resourceObjectCacheKey(requestClusterId, resource, requestNamespace)}`;
+    if (resourceWatchId && resourceWatchKey === nextWatchKey) return;
+    stopLiveObjectRefresh();
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const watchId = await invoke<string>('start_resource_watch', {
+        request: resourceWatchRequest(resource),
+      });
+      if (
+        watchGeneration !== resourceWatchGeneration
+        ||
+        requestClusterId !== activeClusterId
+        || requestNamespace !== namespace
+        || activeView !== (resource.category === 'Workloads' ? 'Workloads' : 'Resources')
+        || (resource.category === 'Workloads' && (!workloadResource || resourceKey(workloadResource) !== resourceKey(resource)))
+        || (resource.category !== 'Workloads' && (!selectedResource || resourceKey(selectedResource) !== resourceKey(resource)))
+      ) {
+        await invoke('stop_resource_watch', { watchId }).catch(() => undefined);
+        return;
+      }
+      resourceWatchId = watchId;
+      resourceWatchKey = nextWatchKey;
+      resourceWatchErrorNotified = false;
+    } catch (error) {
+      // A resource can be listable without watch permission. Keep the current
+      // list usable and surface the limitation once instead of retrying loudly.
+      if (!resourceWatchErrorNotified) {
+        resourceWatchErrorNotified = true;
+        notify(`Live updates unavailable for ${resource.kind}: ${String(error)}`);
+      }
+    }
+  }
+
+  function scheduleResourceWatchRefresh(signal: ResourceWatchSignal) {
+    if (signal.watchId !== resourceWatchId) return;
+    if (signal.error && !resourceWatchErrorNotified) {
+      resourceWatchErrorNotified = true;
+      notify(`Live updates paused: ${signal.error}`);
+    }
+    if (!['added', 'modified', 'deleted'].includes(signal.action)) return;
+    if (resourceWatchRefreshTimer) window.clearTimeout(resourceWatchRefreshTimer);
+    resourceWatchRefreshTimer = window.setTimeout(() => {
+      resourceWatchRefreshTimer = undefined;
+      void refreshVisibleObjectList();
+    }, 120);
+  }
+
+  async function setupResourceWatchListener() {
+    if (!('__TAURI_INTERNALS__' in window)) return;
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      resourceWatchUnlisten = await listen<ResourceWatchSignal>('kuberniva://resource-watch', ({ payload }) => {
+        scheduleResourceWatchRefresh(payload);
+      });
+    } catch {
+      resourceWatchUnlisten = undefined;
+    }
+  }
+
   function startOverviewRefresh() {
     stopOverviewRefresh();
     if (!activeClusterId || activeView !== 'Overview') return;
     overviewRefreshTimer = window.setInterval(() => void loadClusterOverview(), 60_000);
   }
 
-  async function loadClusterOverview() {
-    if (!activeClusterId || loadingOverview) return;
+  async function loadClusterOverview(force = false) {
+    if (!activeClusterId || (loadingOverview && !force)) return;
     const overviewClusterId = activeClusterId;
+    const requestGeneration = ++overviewRequestGeneration;
     loadingOverview = true;
     overviewError = '';
     try {
@@ -549,21 +698,22 @@
         kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
         context: activeCluster,
       });
-      if (overviewClusterId === activeClusterId) {
+      if (requestGeneration === overviewRequestGeneration && overviewClusterId === activeClusterId) {
         clusterOverview = response;
         selectedNodeName = response.nodes.some((node) => node.name === selectedNodeName) ? selectedNodeName : response.nodes[0]?.name || '';
       }
     } catch (error) {
-      if (overviewClusterId === activeClusterId) overviewError = String(error);
+      if (requestGeneration === overviewRequestGeneration && overviewClusterId === activeClusterId) overviewError = String(error);
     } finally {
-      if (overviewClusterId === activeClusterId) loadingOverview = false;
+      if (requestGeneration === overviewRequestGeneration && overviewClusterId === activeClusterId) loadingOverview = false;
     }
   }
 
   async function loadClusterEvents(force = false) {
-    if (!activeClusterId || loadingEvents) return;
+    if (!activeClusterId || (loadingEvents && !force)) return;
     if (!force && clusterEvents.length && eventsObservedAt && activeClusterId === eventsClusterId) return;
     const requestClusterId = activeClusterId;
+    const requestGeneration = ++eventsRequestGeneration;
     loadingEvents = true;
     eventsError = '';
     try {
@@ -572,15 +722,15 @@
         kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
         context: activeCluster,
       });
-      if (requestClusterId === activeClusterId) {
+      if (requestGeneration === eventsRequestGeneration && requestClusterId === activeClusterId) {
         clusterEvents = response;
         eventsClusterId = requestClusterId;
         eventsObservedAt = new Date().toISOString();
       }
     } catch (error) {
-      if (requestClusterId === activeClusterId) eventsError = String(error);
+      if (requestGeneration === eventsRequestGeneration && requestClusterId === activeClusterId) eventsError = String(error);
     } finally {
-      if (requestClusterId === activeClusterId) loadingEvents = false;
+      if (requestGeneration === eventsRequestGeneration && requestClusterId === activeClusterId) loadingEvents = false;
     }
   }
 
@@ -600,6 +750,32 @@
     } catch (error) {
       notify(`Could not open the picker: ${String(error)}`);
     }
+  }
+
+  function closeKubeconfigModal(force = false) {
+    if (loadingCatalog && !force) return;
+    kubeconfigOpen = false;
+    pastedKubeconfig = '';
+  }
+
+  function handleKubeconfigModalKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeKubeconfigModal();
+  }
+
+  function handleKubeconfigSourceTabKeydown(event: KeyboardEvent, mode: KubeconfigInputMode) {
+    const modes: KubeconfigInputMode[] = ['file', 'folder', 'paste'];
+    const currentIndex = modes.indexOf(mode);
+    let nextIndex: number | undefined;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % modes.length;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + modes.length) % modes.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = modes.length - 1;
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    kubeconfigInputMode = modes[nextIndex];
+    void tick().then(() => document.getElementById(`kubeconfig-source-tab-${modes[nextIndex!]}`)?.focus());
   }
 
   function startSidebarResize(event: PointerEvent) {
@@ -715,7 +891,10 @@
 
   function selectResourceCategory(category: ResourceCategory | 'All resources') {
     selectedCategory = category;
+    sidebarResourceCategory = category;
     resourceSearch = '';
+    resourceCategoryMoreOpen = false;
+    closeSidebarTypeMenus();
     clusterPickerOpen = false;
     selectedResource = null;
     resourceObjects = [];
@@ -727,36 +906,125 @@
     if (firstResource) void openResource(firstResource);
   }
 
+  async function refreshClusterConnection(cluster: Cluster) {
+    if (!activeClusterId || activeClusterId !== cluster.id) return false;
+    const requestClusterId = cluster.id;
+    resourceRequestGeneration += 1;
+    workloadRequestGeneration += 1;
+    overviewRequestGeneration += 1;
+    eventsRequestGeneration += 1;
+    stopLiveObjectRefresh();
+    clearClusterObjectCache(requestClusterId);
+    catalogCache.delete(requestClusterId);
+    catalogError = '';
+    overviewError = '';
+    eventsError = '';
+    loadingCatalog = true;
+    updateCluster(requestClusterId, { status: 'Connecting', tone: 'blue' });
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('invalidate_cluster_client', {
+        kubeconfigPath: cluster.kubeconfigPath || kubeconfigPath || null,
+        context: cluster.name,
+      }).catch(() => undefined);
+      const response = await invoke<ClusterCatalog>('discover_cluster_catalog', {
+        kubeconfigPath: cluster.kubeconfigPath || kubeconfigPath || null,
+        context: cluster.name,
+      });
+      if (requestClusterId !== activeClusterId) return false;
+      catalog = response;
+      catalogCache.set(requestClusterId, response);
+      updateCluster(requestClusterId, { status: 'Connected', tone: 'green' });
+      return true;
+    } catch (error) {
+      if (requestClusterId === activeClusterId) {
+        catalogError = String(error);
+        updateCluster(requestClusterId, { status: 'Connection failed', tone: 'red' });
+        notify(`Could not refresh ${cluster.name}: ${catalogError}`);
+      }
+      return false;
+    } finally {
+      if (requestClusterId === activeClusterId) loadingCatalog = false;
+    }
+  }
+
   async function refreshCurrentView() {
-    if (!activeClusterId || refreshingCurrentView) return;
-    if (activeView === 'Overview') {
-      await loadClusterOverview();
-      return;
-    }
-    if (activeView === 'Events') {
-      await loadClusterEvents(true);
-      return;
-    }
-    if (activeView === 'Workloads') {
-      const resource = workloadResource
-        || workloadResources.find((candidate) => candidate.kind === 'Deployment')
-        || workloadResources[0];
-      if (!resource) return;
-      resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
-      await loadWorkloadResource(resource);
-      return;
-    }
-    if (activeView === 'Resources') {
-      if (!selectedResource) {
-        notify('Choose a resource kind to refresh its live objects.');
+    const cluster = clusters.find((candidate) => candidate.id === activeClusterId);
+    if (!cluster || refreshingCluster || loadingCatalog) return;
+    const requestClusterId = cluster.id;
+    const requestView = activeView;
+    const previousWorkloadResource = workloadResource;
+    const previousSelectedResource = selectedResource;
+    refreshingCluster = true;
+    try {
+      if (!await refreshClusterConnection(cluster)) return;
+      if (requestClusterId !== activeClusterId || requestView !== activeView) return;
+      if (requestView === 'Overview') {
+        await loadClusterOverview(true);
+        startOverviewRefresh();
         return;
       }
-      const resource = selectedResource;
+      if (requestView === 'Events') {
+        await loadClusterEvents(true);
+        return;
+      }
+      if (requestView === 'Workloads') {
+        const resource = catalog.resources.find((candidate) => previousWorkloadResource && resourceKey(candidate) === resourceKey(previousWorkloadResource))
+          || catalog.resources.find((candidate) => candidate.kind === 'Deployment')
+          || catalog.resources.find((candidate) => candidate.category === 'Workloads');
+        if (!resource) return;
+        resourceObjectCache.delete(resourceObjectCacheKey(requestClusterId, resource, namespace));
+        await loadWorkloadResource(resource);
+        startLiveObjectRefresh();
+        return;
+      }
+      if (requestView === 'Resources') {
+        const resource = catalog.resources.find((candidate) => previousSelectedResource && resourceKey(candidate) === resourceKey(previousSelectedResource));
+        if (!resource) {
+          selectedResource = null;
+          resourceObjects = [];
+          return;
+        }
+        selectedResource = resource;
+        resourceObjectCache.delete(resourceObjectCacheKey(requestClusterId, resource, namespace));
+        await openResource(resource);
+        return;
+      }
+      if (requestView === 'Logs') {
+        logRequestGeneration += 1;
+        loadingLogs = false;
+        await loadLogs(true);
+      }
+    } catch (error) {
+      notify(`Refresh failed for ${cluster.name}: ${String(error)}`);
+    } finally {
+      refreshingCluster = false;
+    }
+  }
+
+  async function refreshVisibleObjectList() {
+    if (
+      !activeClusterId
+      || loadingCatalog
+      || loadingWorkloads
+      || loadingObjects
+      || loadingEditor
+      || savingEditor
+      || loadingYaml
+      || savingYaml
+      || deletingResource
+    ) return;
+    if (activeView === 'Workloads' && workloadResource && workloadDetailMode !== 'terminal') {
+      const resource = workloadResource;
       resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
-      await openResource(resource);
+      await loadWorkloadResource(resource, true);
       return;
     }
-    if (activeView === 'Logs') await loadLogs(true);
+    if (activeView === 'Resources' && selectedResource) {
+      const resource = selectedResource;
+      resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
+      await openResource(resource, { silent: true });
+    }
   }
 
   async function syncWindowMaximized() {
@@ -804,12 +1072,102 @@
     }
   }
 
+  function applyTheme(nextTheme: ThemeMode) {
+    theme = nextTheme;
+    if (typeof document !== 'undefined') document.documentElement.dataset.theme = nextTheme;
+    try {
+      window.localStorage.setItem(themeStorageKey, nextTheme);
+    } catch {
+      // A theme preference is optional and should never block the workspace.
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(theme === 'light' ? 'dark' : 'light');
+    persistWorkspace();
+    notify(`${theme === 'dark' ? 'Dark' : 'Light'} mode enabled.`);
+  }
+
+  function openCommandSearch() {
+    commandQuery = '';
+    commandOpen = true;
+    void tick().then(() => document.getElementById('global-command-search')?.focus());
+  }
+
+  function handleCommandKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      commandOpen = false;
+      commandQuery = '';
+      return;
+    }
+    if (event.key === 'Enter' && globalSearchResults[0]) {
+      event.preventDefault();
+      void openGlobalSearchResult(globalSearchResults[0]);
+    }
+  }
+
+  async function openGlobalSearchResult(result: GlobalSearchResult) {
+    commandOpen = false;
+    commandQuery = '';
+    if (result.resource.category === 'Workloads') {
+      workloadResource = result.resource;
+      await navigateTo('Workloads');
+      if (result.type === 'object' && result.object) await openObject(result.resource, result.object);
+      return;
+    }
+    selectedCategory = result.resource.category;
+    await navigateTo('Resources');
+    await openResource(result.resource);
+    if (result.type === 'object' && result.object) await openObject(result.resource, result.object);
+  }
+
+  function selectSidebarResourceCategory(category: ResourceCategory | 'All resources') {
+    sidebarResourceCategory = category;
+    sidebarResourceSearch = '';
+  }
+
+  async function runClusterCli() {
+    const command = cliCommand.trim();
+    if (!activeClusterId) {
+      notify('Select a cluster before opening the CLI.');
+      return;
+    }
+    if (!command) {
+      notify('Enter a command, for example: kubectl get pods or helm list');
+      return;
+    }
+    runningCli = true;
+    cliOutput = `$ ${command}\n`;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const response = await invoke<KubeCliResponse>('run_cluster_command', {
+        request: {
+          kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
+          context: activeCluster,
+          namespace: namespace === 'all namespaces' ? null : namespace,
+          command,
+          shell: cliShellMode,
+        },
+      });
+      cliOutput += response.stdout || response.stderr || `(kubectl exited with code ${response.exitCode ?? 0})`;
+      if (response.stderr && response.stdout) cliOutput += `\n${response.stderr}`;
+    } catch (error) {
+      cliOutput += `\n${String(error)}`;
+    } finally {
+      runningCli = false;
+    }
+  }
+
   async function navigateTo(view: View) {
     // Views are self-contained workspaces. Never leave an inspector, YAML tab,
     // stream, or flyout visually attached when the user changes context.
     clusterPickerOpen = false;
     namespaceOpen = false;
+    resourceCategoryMoreOpen = false;
+    closeSidebarTypeMenus();
     commandOpen = false;
+    commandQuery = '';
     if (view !== 'Logs') closeLogs();
     closeEditor();
     closeYamlEditor();
@@ -819,28 +1177,40 @@
     activeView = view;
     if (view === 'Port forwards') {
       stopOverviewRefresh();
+      stopLiveObjectRefresh();
       void syncPortForwards(true);
       return;
     }
     if (view === 'Overview' && activeClusterId) {
+      stopLiveObjectRefresh();
       void loadClusterOverview();
       startOverviewRefresh();
       return;
     }
     if (view === 'Events' && activeClusterId) {
+      stopLiveObjectRefresh();
       void loadClusterEvents();
       return;
     }
     if (view !== 'Overview') stopOverviewRefresh();
-    if (view !== 'Workloads' || !activeClusterId || loadingWorkloads) return;
+    if (view === 'Resources') {
+      startLiveObjectRefresh();
+      return;
+    }
+    if (view !== 'Workloads' || !activeClusterId) {
+      stopLiveObjectRefresh();
+      return;
+    }
+    if (loadingWorkloads) return;
     const preferredResource = workloadResource
       || catalog.resources.find((resource) => resource.kind === 'Deployment')
       || catalog.resources.find((resource) => resource.category === 'Workloads');
     if (!preferredResource) return;
     await loadWorkloadResource(preferredResource);
+    startLiveObjectRefresh();
   }
 
-  async function loadWorkloadResource(resource: ResourceDescriptor) {
+  async function loadWorkloadResource(resource: ResourceDescriptor, silent = false) {
     const requestGeneration = ++workloadRequestGeneration;
     const requestClusterId = activeClusterId;
     const requestNamespace = namespace;
@@ -853,8 +1223,8 @@
       loadingWorkloads = false;
       return;
     }
-    workloadObjects = [];
-    loadingWorkloads = true;
+    if (!silent) workloadObjects = [];
+    if (!silent) loadingWorkloads = true;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const response = await invoke<ResourceObject[]>('list_resource_objects', {
@@ -876,16 +1246,27 @@
         || resourceKey(workloadResource) !== requestResourceKey) return;
       workloadObjects = response;
       resourceObjectCache.set(cacheKey, response);
+      if (
+        editorResource
+        && editorObject
+        && resourceKey(editorResource) === requestResourceKey
+        && !response.some((object) => object.name === editorObject?.name && object.namespace === editorObject?.namespace)
+      ) {
+        const removedName = editorObject.name;
+        closeEditor(false);
+        closeYamlEditor();
+        notify(resource.kind + ' ' + removedName + ' is no longer present in this namespace');
+      }
     } catch (error) {
       if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId) {
         notify(`Could not load ${resource.kind}s: ${String(error)}`);
       }
     } finally {
-      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId) loadingWorkloads = false;
+      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId && !silent) loadingWorkloads = false;
     }
   }
 
-  function selectWorkloadResource(resource: ResourceDescriptor) {
+  async function selectWorkloadResource(resource: ResourceDescriptor) {
     workloadSearch = '';
     // A resource-type switch starts a fresh workload workspace. Do not leave a
     // Pod/deployment inspector, terminal, or log stream attached to the
@@ -895,7 +1276,133 @@
     closeYamlEditor();
     relatedPods = null;
     relatedObject = null;
-    void loadWorkloadResource(resource);
+    await loadWorkloadResource(resource);
+    startLiveObjectRefresh();
+  }
+
+  async function openResourceCategoryMore(focusLast = false) {
+    resourceCategoryMoreOpen = true;
+    await tick();
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('#resource-category-more-menu [role="menuitemradio"]'));
+    const selected = options.find((option) => option.getAttribute('aria-checked') === 'true');
+    (focusLast ? options.at(-1) : selected || options[0])?.focus();
+  }
+
+  function closeResourceCategoryMore(restoreFocus = false) {
+    resourceCategoryMoreOpen = false;
+    if (restoreFocus) void tick().then(() => document.getElementById('resource-category-more-trigger')?.focus());
+  }
+
+  function handleResourceCategoryMoreTriggerKeydown(event: KeyboardEvent) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    void openResourceCategoryMore(event.key === 'ArrowUp');
+  }
+
+  function handleResourceCategoryMoreKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeResourceCategoryMore(true);
+      return;
+    }
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('#resource-category-more-menu [role="menuitemradio"]'));
+    if (!options.length) return;
+    const current = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[role="menuitemradio"]') : null;
+    const currentIndex = current ? options.indexOf(current) : -1;
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowDown') nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % options.length;
+    else if (event.key === 'ArrowUp') nextIndex = currentIndex < 0 ? options.length - 1 : (currentIndex - 1 + options.length) % options.length;
+    else if (current && event.key === 'Home') nextIndex = 0;
+    else if (current && event.key === 'End') nextIndex = options.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    options[nextIndex]?.focus();
+  }
+
+  type SidebarTypeMenu = 'workload' | 'resource';
+
+  function sidebarTypeMenuId(menu: SidebarTypeMenu) {
+    return `sidebar-${menu}-type-options`;
+  }
+
+  function sidebarTypeTriggerId(menu: SidebarTypeMenu) {
+    return `sidebar-${menu}-type-trigger`;
+  }
+
+  function closeSidebarTypeMenus(restoreFocus?: SidebarTypeMenu) {
+    sidebarWorkloadMenuOpen = false;
+    sidebarResourceMenuOpen = false;
+    sidebarResourceSearch = '';
+    if (restoreFocus) void tick().then(() => document.getElementById(sidebarTypeTriggerId(restoreFocus))?.focus());
+  }
+
+  async function openSidebarTypeMenu(menu: SidebarTypeMenu, focusLast = false) {
+    sidebarWorkloadMenuOpen = menu === 'workload';
+    sidebarResourceMenuOpen = menu === 'resource';
+    resourceCategoryMoreOpen = false;
+    await tick();
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${sidebarTypeMenuId(menu)} [role="option"]`));
+    if (!options.length) return;
+    const selected = options.find((option) => option.getAttribute('aria-selected') === 'true');
+    (focusLast ? options.at(-1) : selected || options[0])?.focus();
+  }
+
+  function toggleSidebarTypeMenu(menu: SidebarTypeMenu) {
+    const isOpen = menu === 'workload' ? sidebarWorkloadMenuOpen : sidebarResourceMenuOpen;
+    if (isOpen) {
+      closeSidebarTypeMenus();
+      return;
+    }
+    sidebarWorkloadMenuOpen = menu === 'workload';
+    sidebarResourceMenuOpen = menu === 'resource';
+    sidebarResourceSearch = '';
+    resourceCategoryMoreOpen = false;
+  }
+
+  function handleSidebarTypeTriggerKeydown(event: KeyboardEvent, menu: SidebarTypeMenu) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    void openSidebarTypeMenu(menu, event.key === 'ArrowUp');
+  }
+
+  function handleSidebarTypeMenuKeydown(event: KeyboardEvent, menu: SidebarTypeMenu) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSidebarTypeMenus(menu);
+      return;
+    }
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${sidebarTypeMenuId(menu)} [role="option"]`));
+    if (!options.length) return;
+    const current = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[role="option"]') : null;
+    const currentIndex = current ? options.indexOf(current) : -1;
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowDown') nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % options.length;
+    else if (event.key === 'ArrowUp') nextIndex = currentIndex < 0 ? options.length - 1 : (currentIndex - 1 + options.length) % options.length;
+    else if (current && event.key === 'Home') nextIndex = 0;
+    else if (current && event.key === 'End') nextIndex = options.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    options[nextIndex]?.focus();
+  }
+
+  async function selectSidebarResourceType(resource: ResourceDescriptor) {
+    closeSidebarTypeMenus();
+    selectedCategory = resource.category;
+    sidebarResourceCategory = resource.category;
+    await navigateTo('Resources');
+    await openResource(resource);
+  }
+
+  async function selectSidebarWorkloadType(resource: ResourceDescriptor) {
+    closeSidebarTypeMenus();
+    if (activeView !== 'Workloads') {
+      workloadResource = resource;
+      await navigateTo('Workloads');
+      return;
+    }
+    await selectWorkloadResource(resource);
   }
 
   function objectNamespace(object: ResourceObject) {
@@ -904,6 +1411,57 @@
 
   function resourceKey(resource: ResourceDescriptor) {
     return `${resource.group}\u0000${resource.version}\u0000${resource.plural}`;
+  }
+
+  function resourceSearchText(resource: ResourceDescriptor) {
+    return `${resource.kind} ${resource.plural} ${resource.group} ${resource.version} ${resource.apiVersion} ${resource.category}`.toLowerCase();
+  }
+
+  function buildGlobalSearchResults(
+    query: string,
+    resources: ResourceDescriptor[],
+    currentResource: ResourceDescriptor | null,
+    currentObjects: ResourceObject[],
+    currentWorkloadResource: ResourceDescriptor | null,
+    currentWorkloadObjects: ResourceObject[],
+  ): GlobalSearchResult[] {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return [];
+    const results: GlobalSearchResult[] = [];
+    for (const resource of resources) {
+      if (!resourceSearchText(resource).includes(normalized)) continue;
+      results.push({
+        type: 'resource',
+        resource,
+        title: resource.kind,
+        detail: `${resource.apiVersion} · ${resource.category}${resource.namespaced ? ' · namespaced' : ' · cluster-wide'}`,
+      });
+    }
+    const objectCandidates: Array<{ resource: ResourceDescriptor; object: ResourceObject }> = [];
+    if (currentResource) currentObjects.forEach((object) => objectCandidates.push({ resource: currentResource!, object }));
+    if (currentWorkloadResource) currentWorkloadObjects.forEach((object) => objectCandidates.push({ resource: currentWorkloadResource!, object }));
+    const seenObjects = new Set<string>();
+    for (const { resource, object } of objectCandidates) {
+      const key = `${resourceKey(resource)}\u0000${object.namespace || ''}\u0000${object.name}`;
+      if (seenObjects.has(key)) continue;
+      seenObjects.add(key);
+      const objectText = `${object.name} ${object.namespace || ''} ${resource.kind} ${resource.apiVersion}`.toLowerCase();
+      if (!objectText.includes(normalized)) continue;
+      results.push({
+        type: 'object',
+        resource,
+        object,
+        title: object.name,
+        detail: `${resource.kind} · ${object.namespace || 'cluster-scoped'} · ${resource.apiVersion}`,
+      });
+    }
+    return results
+      .sort((left, right) => {
+        const leftExact = left.title.toLowerCase() === normalized ? 0 : 1;
+        const rightExact = right.title.toLowerCase() === normalized ? 0 : 1;
+        return leftExact - rightExact || left.title.localeCompare(right.title);
+      })
+      .slice(0, 28);
   }
 
   function decodeSecret(value: string) {
@@ -1815,28 +2373,54 @@
     persistWorkspace();
     closeLogs();
     stopOverviewRefresh();
+    stopLiveObjectRefresh();
+    resourceWatchUnlisten?.();
+    resourceWatchUnlisten = undefined;
     stopWindowResizeListening?.();
     if (windowResizeStateTimer) window.clearTimeout(windowResizeStateTimer);
   });
 
   onMount(() => {
+    applyTheme(loadThemePreference());
     void restoreWorkspace();
     void setupWindowControls();
+    void setupResourceWatchListener();
     void syncPortForwards();
     const closeFloatingMenus = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       if (!target?.closest('.cluster-selector')) clusterPickerOpen = false;
       if (!target?.closest('.namespace-picker')) namespaceOpen = false;
+      if (!target?.closest('.resource-category-more')) resourceCategoryMoreOpen = false;
+      if (!target?.closest('.sidebar-workload-menu, .sidebar-resource-menu')) closeSidebarTypeMenus();
       if (!target?.closest('.favorite-context-menu, .favorite-shortcut, .favorite-card-open')) favoriteContextMenu = null;
     };
+    const closeFloatingMenusOnEscape = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        openCommandSearch();
+        return;
+      }
+      if (event.key !== 'Escape') return;
+      if (commandOpen) {
+        commandOpen = false;
+        commandQuery = '';
+      }
+      resourceCategoryMoreOpen = false;
+      closeSidebarTypeMenus();
+    };
     window.addEventListener('pointerdown', closeFloatingMenus);
-    return () => window.removeEventListener('pointerdown', closeFloatingMenus);
+    window.addEventListener('keydown', closeFloatingMenusOnEscape);
+    return () => {
+      window.removeEventListener('pointerdown', closeFloatingMenus);
+      window.removeEventListener('keydown', closeFloatingMenusOnEscape);
+    };
   });
 
   async function loadCluster(cluster: Cluster, force = false) {
     // A Pod name belongs to exactly one cluster context. Never carry its stream across a switch.
     resourceRequestGeneration += 1;
     workloadRequestGeneration += 1;
+    stopLiveObjectRefresh();
     loadingObjects = false;
     loadingWorkloads = false;
     closeLogs();
@@ -1844,6 +2428,8 @@
     closeYamlEditor();
     clusterPickerOpen = false;
     namespaceOpen = false;
+    resourceCategoryMoreOpen = false;
+    closeSidebarTypeMenus();
     activeClusterId = cluster.id;
     activeCluster = cluster.name;
     activeKubeconfigPath = cluster.kubeconfigPath;
@@ -1922,10 +2508,6 @@
   }
 
   function requestClusterRemoval(cluster: Cluster) {
-    if (!cluster.kubeconfigPath) {
-      notify('Choose this kubeconfig as a single source file before removing a context');
-      return;
-    }
     deletionTarget = { type: 'cluster', cluster };
     deletionStep = 1;
     deletionName = '';
@@ -1956,20 +2538,15 @@
   }
 
   async function removeClusterContext(cluster: Cluster) {
-    if (!cluster.kubeconfigPath) return;
     deletingResource = true;
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('forget_kubeconfig_context', {
-        request: { kubeconfigPath: cluster.kubeconfigPath, context: cluster.name },
-      });
       const wasActive = activeClusterId === cluster.id;
       clusters = clusters.filter((candidate) => candidate.id !== cluster.id);
       catalogCache.delete(cluster.id);
       clusterSessionCache.delete(cluster.id);
       const { [cluster.id]: _removedNamespace, ...remainingNamespaces } = persistedClusterNamespaces;
       persistedClusterNamespaces = remainingNamespaces;
-    favoriteClusterIds = favoriteClusterIds.filter((id) => id !== cluster.id);
+      favoriteClusterIds = favoriteClusterIds.filter((id) => id !== cluster.id);
       const { [cluster.id]: _removedFavoriteName, ...remainingFavoriteNames } = favoriteClusterNames;
       favoriteClusterNames = remainingFavoriteNames;
       clearClusterObjectCache(cluster.id);
@@ -1995,7 +2572,7 @@
         if (!kubeconfigSources.length) kubeconfigPath = '';
       }
       persistWorkspace();
-      notify(`Removed ${cluster.name} from its kubeconfig source.`);
+      notify(`Removed ${cluster.name} from Kuberniva. The source kubeconfig was not changed.`);
     } catch (error) {
       notify(`Could not remove ${cluster.name}: ${String(error)}`);
     } finally {
@@ -2007,18 +2584,7 @@
   }
 
   async function refreshActiveCluster() {
-    const cluster = clusters.find((candidate) => candidate.id === activeClusterId);
-    if (cluster) {
-      rememberActiveClusterSession();
-      clearClusterObjectCache(cluster.id);
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('invalidate_cluster_client', { kubeconfigPath: cluster.kubeconfigPath || kubeconfigPath || null, context: cluster.name });
-      } catch {
-        // Older app binaries do not expose this optional performance reset command.
-      }
-      await loadCluster(cluster, true);
-    }
+    await refreshCurrentView();
   }
 
   async function connectKubeconfig() {
@@ -2036,12 +2602,46 @@
         sourceConfigured = true;
         persistWorkspace();
         await navigateTo('Clusters');
-        kubeconfigOpen = false;
+        closeKubeconfigModal(true);
         const addedCount = clusters.length - clusterCountBeforeAdd;
         notify(`${addedCount > 0 ? `${addedCount} new context${addedCount === 1 ? '' : 's'} added` : 'Source refreshed'} · ${clusters.length} context${clusters.length === 1 ? '' : 's'} tracked locally.`);
       }
     } catch (error) {
       notify(`Could not connect: ${String(error)}`);
+    } finally {
+      loadingCatalog = false;
+    }
+  }
+
+  async function importPastedKubeconfig() {
+    const content = pastedKubeconfig.trim();
+    if (!content) {
+      notify('Paste kubeconfig YAML before importing');
+      return;
+    }
+    loadingCatalog = true;
+    try {
+      if (!('__TAURI_INTERNALS__' in window)) {
+        throw new Error('Pasted kubeconfig import is available in the Kuberniva desktop app');
+      }
+      const { invoke } = await import('@tauri-apps/api/core');
+      const summary = await invoke<KubeconfigSummary>('import_pasted_kubeconfig', { content });
+      if (!summary.contexts.length) throw new Error('No contexts found in the pasted kubeconfig');
+      const savedSource = summary.contexts[0]?.sourcePath;
+      if (!savedSource) throw new Error('The pasted kubeconfig could not be saved locally');
+
+      const clusterCountBeforeAdd = clusters.length;
+      kubeconfigPath = savedSource;
+      rememberKubeconfigSource(savedSource);
+      applyKubeconfigSummary(summary, savedSource);
+      sourceConfigured = true;
+      persistWorkspace();
+      await navigateTo('Clusters');
+      closeKubeconfigModal(true);
+      const addedCount = clusters.length - clusterCountBeforeAdd;
+      notify(`${addedCount > 0 ? `${addedCount} new context${addedCount === 1 ? '' : 's'} imported` : 'Pasted source refreshed'} · ${clusters.length} context${clusters.length === 1 ? '' : 's'} tracked locally.`);
+    } catch (error) {
+      notify(`Could not import kubeconfig: ${String(error)}`);
     } finally {
       loadingCatalog = false;
     }
@@ -2078,25 +2678,33 @@
     }
   }
 
-  async function openResource(resource: ResourceDescriptor) {
+  async function openResource(resource: ResourceDescriptor, options: { silent?: boolean } = {}) {
+    const silent = options.silent === true;
     const requestGeneration = ++resourceRequestGeneration;
     const requestClusterId = activeClusterId;
     const requestNamespace = namespace;
     const requestResourceKey = resourceKey(resource);
-    closeEditor();
-    closeYamlEditor();
+    if (!silent) {
+      closeEditor();
+      closeYamlEditor();
+    }
     selectedResource = resource;
-    relatedPods = null;
-    relatedObject = null;
+    if (!silent) {
+      relatedPods = null;
+      relatedObject = null;
+    }
     const cacheKey = resourceObjectCacheKey(requestClusterId, resource, requestNamespace);
     const cachedObjects = resourceObjectCache.get(cacheKey);
     if (cachedObjects) {
       resourceObjects = cachedObjects;
       loadingObjects = false;
+      if (!silent && activeView === 'Resources') startLiveObjectRefresh();
       return;
     }
-    loadingObjects = true;
-    resourceObjects = [];
+    if (!silent) {
+      loadingObjects = true;
+      resourceObjects = [];
+    }
     try {
       if (!('__TAURI_INTERNALS__' in window)) {
         throw new Error('Resource listing is available in the Kuberniva desktop app');
@@ -2121,13 +2729,25 @@
           || resourceKey(selectedResource) !== requestResourceKey) return;
         resourceObjects = response;
         resourceObjectCache.set(cacheKey, response);
+        if (!silent && activeView === 'Resources') startLiveObjectRefresh();
+        if (
+          editorResource
+          && editorObject
+          && resourceKey(editorResource) === requestResourceKey
+          && !response.some((object) => object.name === editorObject?.name && object.namespace === editorObject?.namespace)
+        ) {
+          const removedName = editorObject.name;
+          closeEditor(false);
+          closeYamlEditor();
+          notify(resource.kind + ' ' + removedName + ' is no longer present in this namespace');
+        }
       }
     } catch (error) {
       if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId) {
         notify(`Could not list ${resource.kind}: ${String(error)}`);
       }
     } finally {
-      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId) loadingObjects = false;
+      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId && !silent) loadingObjects = false;
     }
   }
 </script>
@@ -2137,8 +2757,8 @@
   <meta name="description" content="A calm, fast Kubernetes control surface." />
 </svelte:head>
 
-<main class:sidebar-collapsed={sidebarHidden}>
-  <aside class:sidebar-hidden={sidebarHidden} class="sidebar" style:width={`${sidebarWidth}px`} style:flex-basis={`${sidebarWidth}px`}>
+<main class:sidebar-collapsed={sidebarHidden} class:theme-dark={theme === 'dark'}>
+  <aside class:sidebar-hidden={sidebarHidden} class:sidebar-flyout-open={sidebarWorkloadMenuOpen || sidebarResourceMenuOpen} class="sidebar" style:width={`${sidebarWidth}px`} style:flex-basis={`${sidebarWidth}px`}>
     <div class="brand">
       <img class="brand-mark" src="/kuberniva-mark.png" alt="" />
       <span class="brand-wordmark"><strong>Kube</strong><span>rniva</span></span>
@@ -2146,17 +2766,24 @@
 
     <nav aria-label="Cluster navigation">
       <p class="eyebrow">Cluster workspace</p>
-      {#each ['Overview', 'Events', 'Workloads', 'Resources', 'Port forwards'] as view}
-        <button class:active={activeView === view} class="nav-item" on:click={() => navigateTo(view as View)}>
-          <span class="nav-icon">
-            {#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'Resources'}<Database size={17} strokeWidth={1.8} />{:else if view === 'Port forwards'}<Cable size={17} strokeWidth={1.8} />{:else}<Workflow size={17} strokeWidth={1.8} />{/if}
-          </span>
-          {view}
-          {#if view === 'Events' && namespaceClusterEvents.length}<span class="count">{namespaceClusterEvents.length}</span>{/if}
-          {#if view === 'Workloads' && workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}
-          {#if view === 'Resources'}<span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span>{/if}
-          {#if view === 'Port forwards'}<span class:port-forward-count-active={activeClusterPortForwards.length > 0} class="count">{activeClusterPortForwards.length}</span>{/if}
-        </button>
+      {#each ['Overview', 'Events', 'Workloads', 'Resources', 'CLI', 'Port forwards'] as view}
+        {#if view === 'Workloads'}
+          <div class:sidebar-type-open={sidebarWorkloadMenuOpen} class="sidebar-type-nav sidebar-workload-menu">
+            <div class="sidebar-type-nav-row"><button class:active={activeView === 'Workloads'} class="nav-item" on:click={() => navigateTo('Workloads')}><span class="nav-icon"><Workflow size={17} strokeWidth={1.8} /></span>Workloads{#if workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}</button><button id="sidebar-workload-type-trigger" class:active={activeView === 'Workloads'} class="sidebar-type-toggle" type="button" aria-label="Choose workload type" aria-haspopup="dialog" aria-expanded={sidebarWorkloadMenuOpen} on:click={() => toggleSidebarTypeMenu('workload')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'workload')}><ChevronDown size={15} /></button></div>
+            {#if sidebarWorkloadMenuOpen}
+              <div class="sidebar-type-flyout sidebar-workload-flyout" role="dialog" aria-label="Choose workload type" tabindex="-1" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'workload')}><div class="sidebar-type-heading"><div><span><Boxes size={17} /></span><div><strong>Workload types</strong><small>{namespace} · loaded on demand</small></div></div><kbd>esc</kbd></div><div id="sidebar-workload-type-options" class="sidebar-type-options" role="listbox" aria-label="Workload types">{#if workloadResources.length}{#each workloadResources as resource}<button type="button" role="option" aria-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} class:sidebar-type-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} on:click={() => selectSidebarWorkloadType(resource)}><span class="sidebar-type-icon"><Boxes size={15} /></span><span><strong>{resource.kind}</strong><small>{resource.apiVersion} · {resource.namespaced ? 'namespaced' : 'cluster-wide'}</small></span><b>{workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}{:else}<div class="sidebar-type-empty"><strong>No workload APIs discovered</strong><small>Select or refresh a cluster first.</small></div>{/if}</div></div>
+            {/if}
+          </div>
+        {:else if view === 'Resources'}
+          <div class:sidebar-type-open={sidebarResourceMenuOpen} class="sidebar-type-nav sidebar-resource-menu">
+            <div class="sidebar-type-nav-row"><button class:active={activeView === 'Resources'} class="nav-item" on:click={() => navigateTo('Resources')}><span class="nav-icon"><Database size={17} strokeWidth={1.8} /></span>Resources<span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span></button><button id="sidebar-resource-type-trigger" class:active={activeView === 'Resources'} class="sidebar-type-toggle" type="button" aria-label="Choose API resource type" aria-haspopup="dialog" aria-expanded={sidebarResourceMenuOpen} on:click={() => toggleSidebarTypeMenu('resource')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'resource')}><ChevronDown size={15} /></button></div>
+            {#if sidebarResourceMenuOpen}
+              <div class="sidebar-type-flyout sidebar-resource-flyout" role="dialog" aria-label="Choose API resource type" tabindex="-1" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'resource')}><div class="sidebar-type-heading"><div><span><Database size={17} /></span><div><strong>API resource types</strong><small>{resourceWorkspaceResources.length} discovered · filter by category</small></div></div><kbd>esc</kbd></div><div class="sidebar-resource-category-tabs" role="tablist" aria-label="Resource categories"><button class:sidebar-resource-category-active={sidebarResourceCategory === 'All resources'} type="button" role="tab" aria-selected={sidebarResourceCategory === 'All resources'} on:click={() => selectSidebarResourceCategory('All resources')}><span>All</span><b>{resourceWorkspaceResources.length}</b></button>{#each resourceCategories as category}<button class:sidebar-resource-category-active={sidebarResourceCategory === category} type="button" role="tab" aria-selected={sidebarResourceCategory === category} on:click={() => selectSidebarResourceCategory(category)}><span>{category === 'Custom Resources' ? 'Custom APIs' : category}</span><b>{categoryCounts[category] || 0}</b></button>{/each}</div><label class="sidebar-type-search"><Search size={15} /><input bind:value={sidebarResourceSearch} placeholder="Search kind, group, or API version" aria-label="Search API resource types" /></label><div id="sidebar-resource-type-options" class="sidebar-type-options" role="listbox" aria-label="API resource types">{#if sidebarVisibleResources.length}{#each sidebarVisibleResources as resource}<button type="button" role="option" aria-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} class:sidebar-type-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} on:click={() => selectSidebarResourceType(resource)}><span class:custom={resource.crd} class="sidebar-type-icon">{resource.crd ? '◇' : '○'}</span><span><strong>{resource.kind}</strong><small>{resource.apiVersion} · {resource.category}</small></span><b>{selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}{:else}<div class="sidebar-type-empty"><strong>No matching API resources</strong><small>Try another type, group, or category.</small></div>{/if}</div></div>
+            {/if}
+          </div>
+        {:else}
+          <button class:active={activeView === view} class="nav-item" on:click={() => navigateTo(view as View)}><span class="nav-icon">{#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'CLI'}<Terminal size={17} strokeWidth={1.8} />{:else}<Cable size={17} strokeWidth={1.8} />{/if}</span>{view}{#if view === 'Events' && namespaceClusterEvents.length}<span class="count">{namespaceClusterEvents.length}</span>{/if}{#if view === 'Port forwards'}<span class:port-forward-count-active={activeClusterPortForwards.length > 0} class="count">{activeClusterPortForwards.length}</span>{/if}</button>
+        {/if}
       {/each}
     </nav>
 
@@ -2223,8 +2850,9 @@
         {/if}
       </div>
       <div class="top-actions">
-        {#if showClusterWorkspaceControls}<button class="topbar-refresh" disabled={refreshingCurrentView} aria-label="Refresh current view" title="Refresh only the data shown in this view" on:click={refreshCurrentView}><RefreshCw size={15} class={refreshingCurrentView ? 'animate-spin' : ''} /><span>{refreshingCurrentView ? 'Refreshing…' : 'Refresh'}</span></button>{/if}
-        <button class="command-button" aria-label="Search anything" title="Search anything · ⌘ K" on:click={() => (commandOpen = true)}><Search size={15} strokeWidth={2} /><span>Search anything</span><kbd>⌘ K</kbd></button>
+        {#if showClusterWorkspaceControls}<button class="topbar-refresh" disabled={refreshingCurrentView} aria-label="Reconnect and refresh current view" title="Reconnect to the active cluster and refresh this view" on:click={refreshCurrentView}><RefreshCw size={15} class={refreshingCurrentView ? 'animate-spin' : ''} /><span>{refreshingCurrentView ? 'Refreshing…' : 'Refresh'}</span></button>{/if}
+        <button class="command-button" aria-label="Search resources" title="Search resources · ⌘ K" on:click={openCommandSearch}><Search size={15} strokeWidth={2} /><span>Search resources</span><kbd>⌘ K</kbd></button>
+        <button class="icon-button theme-toggle" aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} on:click={toggleTheme}>{#if theme === 'dark'}<Sun size={17} strokeWidth={1.9} />{:else}<Moon size={17} strokeWidth={1.9} />{/if}</button>
         {#if windowControlsAvailable}
           <div class="window-controls" role="group" aria-label="Window controls">
             <button class="icon-button window-size-button" aria-label="Minimize window" title="Minimize window" on:click={minimizeWindow}><Minus size={17} strokeWidth={1.9} /></button>
@@ -2246,6 +2874,7 @@
       </div>
 
       {#if activeView === 'Settings'}
+        <section class="settings-theme-panel panel"><div><p class="eyebrow">Appearance</p><h2>{theme === 'dark' ? 'Dark mode' : 'Light mode'}</h2><p>{theme === 'dark' ? 'A low-light palette for long operational sessions.' : 'A bright daylight palette for quick scanning.'}</p></div><button class="secondary settings-theme-button" on:click={toggleTheme}>{#if theme === 'dark'}<Sun size={15} /> Switch to light{:else}<Moon size={15} /> Switch to dark{/if}</button></section>
         <section class="settings-panel panel"><div class="panel-heading"><div><h2>Workspace settings</h2><p>Connection and display preferences for this device.</p></div></div><div class="settings-row"><div><strong>Kubeconfig sources</strong><small>{kubeconfigSources.length ? `${kubeconfigSources.length} tracked source${kubeconfigSources.length === 1 ? '' : 's'} · newest: ${kubeconfigPath || 'Default: ~/.kube/config'}` : 'No kubeconfig source added'}</small></div><button class="secondary" on:click={() => (kubeconfigOpen = true)}>+ Add source</button></div><div class="settings-row"><div><strong>Manual source sync</strong><small>Startup uses the local context snapshot. Sync only when you want Kuberniva to rescan saved files and folders.</small></div><button class="secondary" disabled={loadingCatalog || !kubeconfigSources.length} on:click={syncKubeconfigSources}>{loadingCatalog ? 'Syncing…' : 'Sync sources'}</button></div><div class="settings-row"><div><strong>Loaded contexts</strong><small>{clusters.length ? `${clusters.length} available locally; OIDC is requested only when one is selected` : 'No kubeconfig context is currently available'}</small></div><button class="secondary" on:click={() => activeClusterId ? refreshActiveCluster() : (kubeconfigOpen = true)}>{activeClusterId ? 'Refresh current' : 'Add source'}</button></div></section>
       {:else if restoringWorkspace}
         <section class="overview-loading"><i></i><div><h2>Restoring your workspace…</h2><p>Reading your saved kubeconfig source locally. Kuberniva will not connect to a cluster or start OIDC until you select one.</p></div></section>
@@ -2253,7 +2882,7 @@
         <section class="empty-view connect-empty"><div class="explore-orbit"><i></i><i></i><b>⌁</b></div><h2>{kubeconfigSources.length ? 'No cached contexts yet' : 'Your workspace is empty'}</h2><p>{kubeconfigSources.length ? 'Your saved sources are not scanned at startup. Sync them only when you want to discover their current contexts.' : 'Add a kubeconfig to discover the contexts and API resources you can access.'}</p><button class="primary" on:click={() => kubeconfigSources.length ? syncKubeconfigSources() : (kubeconfigOpen = true)}>{kubeconfigSources.length ? 'Sync saved sources' : '+ Add kubeconfig'}</button></section>
       {:else if activeView === 'Clusters'}
         <section class="clusters-landing">
-          <div class="clusters-landing-heading"><div><p class="eyebrow">Cluster manager</p><h2>{clusters.length} available cluster{clusters.length === 1 ? '' : 's'}</h2><p>Open a cluster to connect. Add kubeconfigs and safely remove retired contexts here; OIDC starts only for the cluster you select.</p></div><button class="secondary" on:click={() => (kubeconfigOpen = true)}>+ Add kubeconfig</button></div>
+          <div class="clusters-landing-heading"><div><p class="eyebrow">Cluster manager</p><h2>{clusters.length} available cluster{clusters.length === 1 ? '' : 's'}</h2><p>Open a cluster to connect. Add kubeconfigs and remove contexts from Kuberniva without changing source files; OIDC starts only for the cluster you select.</p></div><button class="secondary" on:click={() => (kubeconfigOpen = true)}>+ Add kubeconfig</button></div>
           {#if clusters.length}
             <div class="cluster-list" role="list" aria-label="Tracked clusters">
               <div class="cluster-list-header" aria-hidden="true"><span>Cluster</span><span>Authentication</span><span>Source</span><span>Status</span><span>Favorite</span><span></span></div>
@@ -2264,7 +2893,7 @@
                   <small class="cluster-list-source" title={cluster.kubeconfigPath || ''}>{cluster.kubeconfigPath || 'Source path unavailable'}</small>
                   <span class="cluster-list-status"><i class="status-dot {cluster.tone}"></i>{cluster.status}</span>
                   <button class:favorite-toggle-active={isFavoriteCluster(cluster.id)} class="favorite-toggle" aria-pressed={isFavoriteCluster(cluster.id)} aria-label={`${isFavoriteCluster(cluster.id) ? 'Remove' : 'Add'} ${cluster.name} ${isFavoriteCluster(cluster.id) ? 'from' : 'to'} Favorites`} title={isFavoriteCluster(cluster.id) ? 'Remove from Favorites' : 'Add to Favorites'} on:click|stopPropagation={() => toggleFavoriteCluster(cluster)}><Star size={16} fill={isFavoriteCluster(cluster.id) ? 'currentColor' : 'none'} /></button>
-                  <button class="remove-cluster-list" disabled={!cluster.kubeconfigPath} title={cluster.kubeconfigPath ? `Remove ${cluster.name} from its source kubeconfig` : 'Source file is unavailable'} on:click={() => removeCluster(cluster.id)}>Remove</button>
+                  <button class="remove-cluster-list" title={`Remove ${cluster.name} from Kuberniva only`} on:click={() => removeCluster(cluster.id)}>Remove</button>
                 </article>
               {/each}
             </div>
@@ -2335,7 +2964,7 @@
         {:else if loadingOverview && !clusterOverview}
           <section class="overview-loading"><i></i><div><h2>Reading cluster signals…</h2><p>Loading Nodes and current metrics only for {activeCluster}.</p></div></section>
         {:else if overviewError}
-          <section class="overview-error panel"><div><span>!</span><div><h2>Node overview is unavailable</h2><p>{overviewError}</p></div></div><button class="secondary" disabled={loadingOverview} on:click={loadClusterOverview}>Try again</button></section>
+          <section class="overview-error panel"><div><span>!</span><div><h2>Node overview is unavailable</h2><p>{overviewError}</p></div></div><button class="secondary" disabled={loadingOverview} on:click={() => loadClusterOverview(true)}>Try again</button></section>
         {:else if clusterOverview}
           <section class="cluster-overview-dashboard">
           <section class="cluster-hero">
@@ -2405,7 +3034,25 @@
             <div class="connection-error"><strong>Connecting to {activeCluster}…</strong><p>Reading the live API catalog and namespaces.</p></div>
           {:else}
             <div class="resource-workbench-heading"><div class="resource-workbench-title"><span><Database size={21} strokeWidth={1.8} /></span><div><p class="eyebrow">API explorer</p><h2>Resources</h2><p>Choose a Kubernetes API, inspect its live objects, and act without losing your place.</p></div></div><div class="resource-workbench-stat"><strong>{resourceWorkspaceResources.length}</strong><span>API kinds discovered</span></div></div>
-            <div class="resource-category-tabs" aria-label="Resource categories"><button class:resource-category-active={selectedCategory === 'All resources'} on:click={() => selectResourceCategory('All resources')}>All <b>{resourceWorkspaceResources.length}</b></button>{#each resourceCategories as category}<button class:resource-category-active={selectedCategory === category} title={category === 'Cluster' ? 'Cluster-scoped resources' : category} on:click={() => selectResourceCategory(category)}>{category === 'Cluster' ? 'Cluster' : category === 'Custom Resources' ? 'Custom APIs' : category}<b>{categoryCounts[category] || 0}</b></button>{/each}</div>
+            <div class="resource-category-tabs" aria-label="Resource categories">
+              <button class:resource-category-active={selectedCategory === 'All resources'} on:click={() => selectResourceCategory('All resources')}>All <b>{resourceWorkspaceResources.length}</b></button>
+              {#each primaryResourceCategories as category}
+                <button class:resource-category-active={selectedCategory === category} title={category} on:click={() => selectResourceCategory(category)}>{category}<b>{categoryCounts[category] || 0}</b></button>
+              {/each}
+              <div class:resource-category-more-open={resourceCategoryMoreOpen} class="resource-category-more">
+                <button id="resource-category-more-trigger" class:resource-category-active={overflowResourceCategorySelected} class="resource-category-more-trigger" type="button" aria-haspopup="menu" aria-expanded={resourceCategoryMoreOpen} aria-controls="resource-category-more-menu" title={overflowResourceCategorySelected ? `Selected: ${selectedCategory}` : 'More resource categories'} on:click={() => (resourceCategoryMoreOpen = !resourceCategoryMoreOpen)} on:keydown={handleResourceCategoryMoreTriggerKeydown}>
+                  <span>More</span>{#if overflowResourceCategorySelected}<em>{selectedCategory === 'Custom Resources' ? 'Custom APIs' : selectedCategory}</em>{/if}<ChevronDown size={14} />
+                </button>
+                {#if resourceCategoryMoreOpen}
+                  <div id="resource-category-more-menu" class="resource-category-more-menu" role="menu" aria-label="More resource categories" tabindex="-1" on:keydown={handleResourceCategoryMoreKeydown}>
+                    <div class="resource-category-more-heading" role="presentation"><strong>More categories</strong><kbd>esc</kbd></div>
+                    {#each overflowResourceCategories as category}
+                      <button type="button" role="menuitemradio" aria-checked={selectedCategory === category} class:resource-category-more-selected={selectedCategory === category} on:click={() => selectResourceCategory(category)}><span><strong>{category === 'Custom Resources' ? 'Custom APIs' : category}</strong><small>{category === 'Cluster' ? 'Cluster-scoped resources' : category === 'Custom Resources' ? 'Installed CRDs and custom APIs' : 'Persistent volumes and storage classes'}</small></span><b>{categoryCounts[category] || 0}</b>{#if selectedCategory === category}<i>✓</i>{/if}</button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            </div>
             <div class="resource-workbench-body">
               <aside class="resource-kind-browser" aria-label="API resource kinds">
                 <div class="resource-kind-browser-heading resource-pane-heading"><span>01</span><div><strong>Resource types</strong><small>{visibleResources.length} available in {selectedCategory === 'All resources' ? 'all categories' : selectedCategory}</small></div></div>
@@ -2494,6 +3141,15 @@
             </div>
           {/if}
         </section>
+      {:else if activeView === 'CLI'}
+        <section class="cli-page panel">
+          <div class="cli-heading"><div class="cli-heading-mark"><Terminal size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Cluster command line</p><h2>CLI</h2><p>Run kubectl, Helm, kustomize, or any installed command against this workspace. Direct Kubernetes commands receive the active kubeconfig, context, and namespace automatically.</p></div><span class="cli-context-badge">{activeCluster}</span></div>
+          <div class="cli-context-strip"><div><span>Context</span><strong>{activeCluster}</strong></div><div><span>Namespace</span><strong>{namespace === 'all namespaces' ? 'All namespaces' : namespace}</strong></div><div><span>Kubeconfig</span><strong title={activeKubeconfigPath || kubeconfigPath || 'Default kubeconfig'}>{activeKubeconfigPath || kubeconfigPath || 'Default kubeconfig'}</strong></div></div>
+          <form class="cli-command-form" on:submit|preventDefault={runClusterCli}><span class="cli-prompt">$</span><input bind:value={cliCommand} aria-label="Cluster command" placeholder="kubectl get pods -o wide" spellcheck="false" /><button class="primary" type="submit" disabled={runningCli}>{runningCli ? 'Running…' : 'Run command'}</button></form>
+          <div class="cli-controls"><label class="cli-shell-toggle"><input type="checkbox" bind:checked={cliShellMode} /><span>Shell mode</span></label><small>{cliShellMode ? 'Runs the command through your login shell for pipes, redirects, and local helpers.' : 'Direct mode runs one executable with quote-aware arguments. Try kubectl, helm, kustomize, or any command on PATH.'}</small></div>
+          <div class="cli-suggestions"><span>Quick commands</span><button type="button" on:click={() => (cliCommand = 'kubectl get pods -o wide')}>kubectl get pods</button><button type="button" on:click={() => (cliCommand = 'kubectl get events --sort-by=.lastTimestamp')}>kubectl events</button><button type="button" on:click={() => (cliCommand = 'helm list --all-namespaces')}>helm list</button><button type="button" on:click={() => (cliCommand = 'kubectl api-resources')}>api-resources</button></div>
+          <pre class="cli-output" aria-live="polite">{cliOutput || 'Output will appear here. Kubernetes tools are bound to the active context; shell mode is available for pipelines and other local commands.'}</pre>
+        </section>
       {:else if activeView === 'Port forwards'}
         <section class="port-forwards-page panel">
           <div class="port-forwards-heading"><div class="port-forwards-heading-mark"><Cable size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Local listeners</p><h2>Port forwarding</h2><p>Listeners shown here belong only to {activeClusterId ? activeCluster : 'the selected cluster'} and remain active until you stop them or quit Kuberniva.</p></div><div class:port-forward-summary-active={activeClusterPortForwards.length > 0} class="port-forward-summary"><span class="port-forward-listening-dot"></span><strong>{activeClusterPortForwards.length}</strong><small>{activeClusterPortForwards.length === 1 ? 'active listener' : 'active listeners'}</small></div><button class="secondary port-forward-refresh" disabled={syncingPortForwards} on:click={() => syncPortForwards(true)}><RefreshCw size={15} class={syncingPortForwards ? 'animate-spin' : ''} />{syncingPortForwards ? 'Checking…' : 'Check status'}</button></div>
@@ -2538,7 +3194,19 @@
                   <div class="workload-object-list" aria-label={`${workloadResource?.kind || 'Workload'} list`}>
                     <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-label="Workload columns"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Ready</span><span>CPU</span><span>Memory</span>{/if}<span>Age</span><span></span></div>
                     {#each visibleWorkloadObjects as workload}
-                      <button class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-row group" on:click={() => workloadResource && openObject(workloadResource, workload)}>
+                      <button
+                        class:workload-pod-row={workloadResource?.kind === 'Pod'}
+                        class:workload-object-selected={Boolean(
+                          editorResource
+                            && editorObject
+                            && workloadResource
+                            && resourceKey(editorResource) === resourceKey(workloadResource)
+                            && editorObject.name === workload.name
+                            && editorObject.namespace === workload.namespace
+                        )}
+                        class="workload-object-row group"
+                        on:click={() => workloadResource && openObject(workloadResource, workload)}
+                      >
                         <span class={`workload-status-dot ${workloadStatusTone(workload)}`}></span>
                         <div class="workload-object-name"><strong>{workload.name}</strong><small>{workload.namespace || 'cluster scope'}{#if workload.nodeName} · {workload.nodeName}{/if}</small></div>
                         <div class="workload-row-fact"><b class={`workload-status-label ${workloadStatusTone(workload)}`}>{workloadStatusLabel(workload)}</b></div>
@@ -2596,7 +3264,7 @@
           </section>
         {/if}
       {:else if activeView === 'Explore'}
-        <section class="empty-view"><div class="explore-orbit"><i></i><i></i><b>⌕</b></div><h2>Explore without memorizing paths</h2><p>Ask for a resource, filter it, and move between related objects in one place.</p><button class="primary" on:click={() => (commandOpen = true)}>Search resources</button></section>
+        <section class="empty-view"><div class="explore-orbit"><i></i><i></i><b>⌕</b></div><h2>Explore without memorizing paths</h2><p>Ask for a resource, filter it, and move between related objects in one place.</p><button class="primary" on:click={openCommandSearch}>Search resources</button></section>
       {:else}
         {#if logTarget}
           <section class="logs-workspace panel">
@@ -2628,7 +3296,7 @@
         {#if deletionStep === 1}
           <p class="eyebrow">Review deletion request</p>
           <h2>{deletionTarget.type === 'resource' ? `Delete ${deletionTarget.resource.kind}?` : 'Remove kubeconfig context?'}</h2>
-          <p class="deletion-intro">{deletionTarget.type === 'resource' ? 'This sends a Kubernetes DELETE request only to the cluster and namespace shown below.' : 'This changes only the local kubeconfig source shown below; it does not delete the remote Kubernetes cluster.'}</p>
+          <p class="deletion-intro">{deletionTarget.type === 'resource' ? 'This sends a Kubernetes DELETE request only to the cluster and namespace shown below.' : 'This removes the context from Kuberniva only. The original kubeconfig source remains unchanged.'}</p>
           <dl class="deletion-target-summary">
             <div><dt>Target</dt><dd>{deletionTargetName()}</dd></div>
             {#if deletionTarget.type === 'resource'}
@@ -2637,14 +3305,14 @@
               <div><dt>Source</dt><dd title={deletionTarget.cluster.kubeconfigPath}>{deletionTarget.cluster.kubeconfigPath}</dd></div>
             {/if}
           </dl>
-          <div class="deletion-warning">{deletionTarget.type === 'resource' ? 'Deletion cannot be undone. Kubernetes may handle dependents according to the resource’s configured deletion policy.' : 'This changes the source file immediately. Only this context and unreferenced credentials or cluster entries are removed.'}</div>
+          <div class="deletion-warning">{deletionTarget.type === 'resource' ? 'Deletion cannot be undone. Kubernetes may handle dependents according to the resource’s configured deletion policy.' : 'You can bring this context back later by manually syncing its kubeconfig source. No source file is edited or deleted.'}</div>
           <div class="deletion-actions"><button class="secondary" disabled={deletingResource} on:click={cancelDeletion}>Cancel</button><button class="destructive" disabled={deletingResource} on:click={continueDeletion}>Continue</button></div>
         {:else}
           <p class="eyebrow">Final confirmation</p>
           <h2>Type the name to confirm</h2>
           <p class="deletion-intro">To complete this deletion, type <strong>{deletionTargetName()}</strong> exactly. This prevents an accidental delete from a fast click.</p>
           <label class="deletion-name-input">{deletionTarget.type === 'resource' ? 'Resource name' : 'Context name'}<input bind:value={deletionName} autocomplete="off" spellcheck="false" placeholder={deletionTargetName()} /></label>
-          <div class="deletion-actions"><button class="secondary" disabled={deletingResource} on:click={() => (deletionStep = 1)}>Back</button><button class="destructive" disabled={deletingResource || deletionName !== deletionTargetName()} on:click={confirmDeletion}>{deletingResource ? 'Deleting…' : deletionTarget.type === 'resource' ? 'Delete resource' : 'Remove context'}</button></div>
+          <div class="deletion-actions"><button class="secondary" disabled={deletingResource} on:click={() => (deletionStep = 1)}>Back</button><button class="destructive" disabled={deletingResource || deletionName !== deletionTargetName()} on:click={confirmDeletion}>{deletingResource ? 'Deleting…' : deletionTarget.type === 'resource' ? 'Delete resource' : 'Remove from Kuberniva'}</button></div>
         {/if}
       </div>
     </div>
@@ -2652,22 +3320,53 @@
 
   {#if commandOpen}
     <div class="modal-backdrop" role="presentation" on:click={() => (commandOpen = false)}>
-      <div class="command-modal" role="dialog" aria-modal="true" aria-label="Search Kuberniva" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
-        <div class="command-input"><span>⌕</span><input placeholder="Search workloads, pods, namespaces…" /><kbd>esc</kbd></div>
-        <p class="eyebrow">Navigate</p>
-        <button on:click={() => { void navigateTo('Resources'); commandOpen = false }}>▤ <span>Browse discovered resources</span><kbd>↵</kbd></button>
-        <button on:click={() => { kubeconfigOpen = true; commandOpen = false }}>⌁ <span>Add a kubeconfig</span></button>
+      <div class="command-modal" role="dialog" aria-modal="true" aria-label="Search Kuberniva resources" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation={handleCommandKeydown}>
+        <div class="command-input"><Search size={16} /><input id="global-command-search" bind:value={commandQuery} aria-label="Search Kubernetes resources" placeholder="Search kind, object, API group, or version…" /><kbd>esc</kbd></div>
+        {#if commandQuery.trim()}
+          <p class="eyebrow">{globalSearchResults.length ? `${globalSearchResults.length} matches` : 'No matches'}</p>
+          <div class="command-results" role="listbox" aria-label="Search results">
+            {#each globalSearchResults as result}
+              <button class="command-result" type="button" role="option" aria-selected={false} on:click={() => openGlobalSearchResult(result)}><span class="command-result-mark">{result.type === 'object' ? '○' : '◇'}</span><span><strong>{result.title}</strong><small>{result.detail}</small></span><b>{result.type === 'object' ? 'Open' : 'Browse'}</b></button>
+            {:else}
+              <div class="command-empty"><Search size={18} /><strong>No discovered resource matches “{commandQuery}”</strong><small>Try a kind, object name, API group, or version such as v1beta1.</small></div>
+            {/each}
+          </div>
+        {:else}
+          <p class="eyebrow">Search the active cluster</p>
+          <div class="command-hint"><Search size={18} /><div><strong>Find any discovered API or loaded object</strong><small>Search is case-insensitive and includes alpha/beta API versions.</small></div></div>
+          <button class="command-secondary-action" type="button" on:click={() => { commandOpen = false; void navigateTo('Resources') }}>▤ <span>Browse all discovered resources</span><kbd>↵</kbd></button>
+          <button class="command-secondary-action" type="button" on:click={() => { commandOpen = false; kubeconfigOpen = true }}>⌁ <span>Add a kubeconfig</span></button>
+        {/if}
       </div>
     </div>
   {/if}
 
   {#if kubeconfigOpen}
-    <div class="modal-backdrop" role="presentation" on:click={() => !loadingCatalog && (kubeconfigOpen = false)}>
-      <div class="kubeconfig-modal" role="dialog" aria-modal="true" aria-label="Add kubeconfig" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
-        <div class="modal-kube-mark">⌁</div><h2>Add kubeconfig source</h2><p>Choose a kubeconfig file or a folder containing multiple files. This always adds to the contexts already tracked in Kuberniva; it never replaces them. Paths beginning with <code>~/</code>, relative paths from your home folder, and absolute paths are all accepted.</p>
-        <label>kubeconfig file or directory <input bind:value={kubeconfigPath} placeholder="Default: ~/.kube/config" /></label>
-        <div class="source-picker-actions"><button class="secondary" on:click={() => chooseKubeconfig(false)}>Choose file…</button><button class="secondary" on:click={() => chooseKubeconfig(true)}>Choose folder…</button></div>
-        <div class="kubeconfig-modal-footer"><button class="secondary" on:click={() => (kubeconfigOpen = false)}>Cancel</button><button class="primary" disabled={loadingCatalog} on:click={connectKubeconfig}>{loadingCatalog ? 'Discovering…' : 'Add & discover'}</button></div>
+    <div class="modal-backdrop kubeconfig-backdrop" role="presentation" on:click={() => closeKubeconfigModal()}>
+      <div class="kubeconfig-modal" role="dialog" aria-modal="true" aria-labelledby="kubeconfig-modal-title" aria-describedby="kubeconfig-modal-description" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation={handleKubeconfigModalKeydown}>
+        <div class="kubeconfig-modal-heading"><div class="modal-kube-mark">⌁</div><div><h2 id="kubeconfig-modal-title">Add kubeconfig</h2><p id="kubeconfig-modal-description">Add one source without replacing any clusters already in your workspace.</p></div></div>
+
+        <div class="kubeconfig-source-modes" role="tablist" aria-label="Kubeconfig source type">
+          <button id="kubeconfig-source-tab-file" type="button" class:source-mode-active={kubeconfigInputMode === 'file'} role="tab" aria-selected={kubeconfigInputMode === 'file'} aria-controls="kubeconfig-source-panel" tabindex={kubeconfigInputMode === 'file' ? 0 : -1} on:click={() => (kubeconfigInputMode = 'file')} on:keydown={(event) => handleKubeconfigSourceTabKeydown(event, 'file')}><span>▤</span><strong>File</strong><small>One kubeconfig</small></button>
+          <button id="kubeconfig-source-tab-folder" type="button" class:source-mode-active={kubeconfigInputMode === 'folder'} role="tab" aria-selected={kubeconfigInputMode === 'folder'} aria-controls="kubeconfig-source-panel" tabindex={kubeconfigInputMode === 'folder' ? 0 : -1} on:click={() => (kubeconfigInputMode = 'folder')} on:keydown={(event) => handleKubeconfigSourceTabKeydown(event, 'folder')}><span>▱</span><strong>Folder</strong><small>Many files</small></button>
+          <button id="kubeconfig-source-tab-paste" type="button" class:source-mode-active={kubeconfigInputMode === 'paste'} role="tab" aria-selected={kubeconfigInputMode === 'paste'} aria-controls="kubeconfig-source-panel" tabindex={kubeconfigInputMode === 'paste' ? 0 : -1} on:click={() => (kubeconfigInputMode = 'paste')} on:keydown={(event) => handleKubeconfigSourceTabKeydown(event, 'paste')}><span>⌘</span><strong>Paste YAML</strong><small>From clipboard</small></button>
+        </div>
+
+        {#if kubeconfigInputMode === 'paste'}
+          <div id="kubeconfig-source-panel" class="kubeconfig-source-panel paste-source-panel" role="tabpanel" aria-labelledby="kubeconfig-source-tab-paste">
+            <div class="source-panel-heading"><div><strong>Paste kubeconfig YAML</strong><small>Contexts are saved locally and become reusable after restarting Kuberniva.</small></div><b>YAML</b></div>
+            <textarea aria-label="Kubeconfig YAML" bind:value={pastedKubeconfig} spellcheck="false" placeholder={'apiVersion: v1\nkind: Config\nclusters:\n  - cluster: …\ncontexts:\n  - context: …'}></textarea>
+            <p class="paste-security-note"><span>✓</span>Your existing sources remain untouched. The pasted configuration is stored only in Kuberniva's local app data.</p>
+          </div>
+        {:else}
+          <div id="kubeconfig-source-panel" class="kubeconfig-source-panel" role="tabpanel" aria-labelledby={`kubeconfig-source-tab-${kubeconfigInputMode}`}>
+            <div class="source-panel-heading"><div><strong>{kubeconfigInputMode === 'folder' ? 'Choose a kubeconfig folder' : 'Choose a kubeconfig file'}</strong><small>{kubeconfigInputMode === 'folder' ? 'Every readable kubeconfig in the folder is discovered.' : 'Paths can be absolute, relative to home, or begin with ~/.'}</small></div></div>
+            <label>{kubeconfigInputMode === 'folder' ? 'Folder path' : 'File path'}<input bind:value={kubeconfigPath} placeholder={kubeconfigInputMode === 'folder' ? '~/clusters' : 'Default: ~/.kube/config'} /></label>
+            <div class="source-picker-actions"><button class="secondary" on:click={() => chooseKubeconfig(kubeconfigInputMode === 'folder')}>{kubeconfigInputMode === 'folder' ? 'Choose folder…' : 'Choose file…'}</button></div>
+          </div>
+        {/if}
+
+        <div class="kubeconfig-modal-footer"><button class="secondary" disabled={loadingCatalog} on:click={() => closeKubeconfigModal()}>Cancel</button><button class="primary" disabled={loadingCatalog || (kubeconfigInputMode === 'paste' && !pastedKubeconfig.trim())} on:click={() => kubeconfigInputMode === 'paste' ? importPastedKubeconfig() : connectKubeconfig()}>{loadingCatalog ? (kubeconfigInputMode === 'paste' ? 'Importing…' : 'Discovering…') : (kubeconfigInputMode === 'paste' ? 'Import contexts' : 'Add & discover')}</button></div>
       </div>
     </div>
   {/if}

@@ -1,8 +1,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
+use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod};
 use kube::{
-    api::{Api, AttachParams, DeleteParams, DynamicObject, ListParams, LogParams},
+    api::{
+        Api, AttachParams, DeleteParams, DynamicObject, ListParams, LogParams, WatchEvent,
+        WatchParams,
+    },
     config::{KubeConfigOptions, Kubeconfig},
     core::ApiResource,
     discovery::{verbs, Discovery, Scope},
@@ -10,18 +14,23 @@ use kube::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
     },
 };
+use tauri::{Emitter, Manager};
 use tokio::{
     io::{copy_bidirectional, AsyncReadExt},
     net::TcpListener,
+    process::Command as TokioCommand,
     sync::oneshot,
 };
 use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
@@ -29,7 +38,12 @@ use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 static KUBE_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, Client>>> = OnceLock::new();
 static PORT_FORWARD_REGISTRY: OnceLock<Mutex<HashMap<String, PortForwardRuntime>>> =
     OnceLock::new();
+static RESOURCE_WATCH_REGISTRY: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> =
+    OnceLock::new();
+static KUBECONFIG_IMPORT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static NEXT_PORT_FORWARD_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RESOURCE_WATCH_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_PASTED_KUBECONFIG_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,13 +61,6 @@ struct KubeContext {
 struct KubeconfigSummary {
     contexts: Vec<KubeContext>,
     current_context: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ForgetKubeconfigContextRequest {
-    kubeconfig_path: String,
-    context: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +96,15 @@ struct ResourceRequest {
     plural: String,
     namespaced: bool,
     namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceWatchSignal {
+    watch_id: String,
+    action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,6 +263,26 @@ struct PodExecRequest {
 struct PodExecResponse {
     stdout: String,
     stderr: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KubeCliRequest {
+    kubeconfig_path: Option<String>,
+    context: String,
+    namespace: Option<String>,
+    command: String,
+    #[serde(default)]
+    shell: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KubeCliResponse {
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    success: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -473,6 +509,444 @@ fn contexts_from_kubeconfig(
             }
         })
         .collect()
+}
+
+fn validate_relocatable_file_reference(
+    value: Option<&str>,
+    overridden_by_inline_data: bool,
+    owner: &str,
+    field: &str,
+    inline_field: &str,
+) -> Result<(), String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if overridden_by_inline_data || Path::new(value).is_absolute() {
+        return Ok(());
+    }
+    Err(format!(
+        "{owner} uses a relative `{field}` path. Pasted kubeconfigs are stored in Kuberniva's app data, so use an absolute path or embed the value with `{inline_field}`"
+    ))
+}
+
+fn validate_relocatable_kubeconfig(kubeconfig: &Kubeconfig) -> Result<(), String> {
+    for named_cluster in &kubeconfig.clusters {
+        let Some(cluster) = named_cluster.cluster.as_ref() else {
+            continue;
+        };
+        validate_relocatable_file_reference(
+            cluster.certificate_authority.as_deref(),
+            cluster
+                .certificate_authority_data
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            &format!("Cluster `{}`", named_cluster.name),
+            "certificate-authority",
+            "certificate-authority-data",
+        )?;
+    }
+
+    for named_auth_info in &kubeconfig.auth_infos {
+        let Some(auth_info) = named_auth_info.auth_info.as_ref() else {
+            continue;
+        };
+        let owner = format!("User `{}`", named_auth_info.name);
+        validate_relocatable_file_reference(
+            auth_info.client_certificate.as_deref(),
+            auth_info
+                .client_certificate_data
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            &owner,
+            "client-certificate",
+            "client-certificate-data",
+        )?;
+        validate_relocatable_file_reference(
+            auth_info.client_key.as_deref(),
+            auth_info.client_key_data.is_some(),
+            &owner,
+            "client-key",
+            "client-key-data",
+        )?;
+        validate_relocatable_file_reference(
+            auth_info.token_file.as_deref(),
+            auth_info.token.is_some(),
+            &owner,
+            "tokenFile",
+            "token",
+        )?;
+
+        if let Some(exec) = auth_info.exec.as_ref() {
+            if let Some(command) = exec
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+            {
+                let contains_separator = command.contains('/') || command.contains('\\');
+                if contains_separator && !Path::new(command).is_absolute() {
+                    return Err(format!(
+                        "{owner} uses a relative exec command. Pasted kubeconfigs are stored in Kuberniva's app data, so use a bare command available on PATH or an absolute path"
+                    ));
+                }
+            }
+        }
+
+        if let Some(auth_provider) = auth_info.auth_provider.as_ref() {
+            let idp_ca = auth_provider
+                .config
+                .get("idp-certificate-authority")
+                .map(String::as_str);
+            let has_inline_idp_ca = auth_provider
+                .config
+                .get("idp-certificate-authority-data")
+                .is_some_and(|value| !value.trim().is_empty());
+            validate_relocatable_file_reference(
+                idp_ca,
+                has_inline_idp_ca,
+                &owner,
+                "idp-certificate-authority",
+                "idp-certificate-authority-data",
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_imported_kubeconfig(kubeconfig: &Kubeconfig) -> Result<(), String> {
+    if let Some(kind) = kubeconfig.kind.as_deref() {
+        if kind != "Config" {
+            return Err(format!(
+                "The pasted YAML is a Kubernetes `{kind}` object, not a kubeconfig"
+            ));
+        }
+    }
+    if let Some(api_version) = kubeconfig.api_version.as_deref() {
+        if api_version != "v1" {
+            return Err(format!(
+                "Unsupported kubeconfig API version `{api_version}`; expected `v1`"
+            ));
+        }
+    }
+    if kubeconfig.contexts.is_empty() {
+        return Err("The pasted kubeconfig does not contain any contexts".to_string());
+    }
+    if kubeconfig.clusters.is_empty() {
+        return Err("The pasted kubeconfig does not contain any clusters".to_string());
+    }
+
+    let mut cluster_names = HashSet::new();
+    for cluster in &kubeconfig.clusters {
+        if cluster.name.trim().is_empty() {
+            return Err("The pasted kubeconfig contains a cluster without a name".to_string());
+        }
+        if !cluster_names.insert(cluster.name.as_str()) {
+            return Err(format!(
+                "The pasted kubeconfig contains duplicate cluster `{}` entries",
+                cluster.name
+            ));
+        }
+    }
+
+    let mut auth_info_names = HashSet::new();
+    for auth_info in &kubeconfig.auth_infos {
+        if auth_info.name.trim().is_empty() {
+            return Err("The pasted kubeconfig contains a user without a name".to_string());
+        }
+        if !auth_info_names.insert(auth_info.name.as_str()) {
+            return Err(format!(
+                "The pasted kubeconfig contains duplicate user `{}` entries",
+                auth_info.name
+            ));
+        }
+    }
+
+    let mut context_names = HashSet::new();
+    for named_context in &kubeconfig.contexts {
+        if named_context.name.trim().is_empty() {
+            return Err("The pasted kubeconfig contains a context without a name".to_string());
+        }
+        if !context_names.insert(named_context.name.as_str()) {
+            return Err(format!(
+                "The pasted kubeconfig contains duplicate context `{}` entries",
+                named_context.name
+            ));
+        }
+        let context = named_context.context.as_ref().ok_or_else(|| {
+            format!(
+                "Context `{}` does not contain connection details",
+                named_context.name
+            )
+        })?;
+        if context.cluster.trim().is_empty() || !cluster_names.contains(context.cluster.as_str()) {
+            return Err(format!(
+                "Context `{}` references missing cluster `{}`",
+                named_context.name, context.cluster
+            ));
+        }
+        if let Some(user) = context.user.as_deref() {
+            if !user.trim().is_empty() && !auth_info_names.contains(user) {
+                return Err(format!(
+                    "Context `{}` references missing user `{user}`",
+                    named_context.name
+                ));
+            }
+        }
+    }
+
+    for cluster_name in kubeconfig
+        .contexts
+        .iter()
+        .filter_map(|named| named.context.as_ref())
+        .map(|context| context.cluster.as_str())
+        .collect::<HashSet<_>>()
+    {
+        let cluster = kubeconfig
+            .clusters
+            .iter()
+            .find(|candidate| candidate.name == cluster_name)
+            .and_then(|candidate| candidate.cluster.as_ref())
+            .ok_or_else(|| {
+                format!("Cluster `{cluster_name}` does not contain connection details")
+            })?;
+        if cluster
+            .server
+            .as_deref()
+            .map_or(true, |server| server.trim().is_empty())
+        {
+            return Err(format!(
+                "Cluster `{cluster_name}` does not declare a Kubernetes API server"
+            ));
+        }
+    }
+
+    if let Some(current_context) = kubeconfig
+        .current_context
+        .as_deref()
+        .filter(|context| !context.trim().is_empty())
+    {
+        if !context_names.contains(current_context) {
+            return Err(format!(
+                "Current context `{current_context}` is not present in the pasted kubeconfig"
+            ));
+        }
+    }
+
+    validate_relocatable_kubeconfig(kubeconfig)?;
+
+    Ok(())
+}
+
+fn parse_pasted_kubeconfig(yaml: &str) -> Result<(Kubeconfig, String, String), String> {
+    if yaml.trim().is_empty() {
+        return Err("Paste a kubeconfig before importing it".to_string());
+    }
+    if yaml.len() > MAX_PASTED_KUBECONFIG_BYTES {
+        return Err(format!(
+            "The pasted kubeconfig is larger than the {} MiB import limit",
+            MAX_PASTED_KUBECONFIG_BYTES / 1024 / 1024
+        ));
+    }
+
+    let normalized = yaml
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let persisted = format!("{}\n", normalized.trim());
+    let kubeconfig = Kubeconfig::from_yaml(&persisted)
+        .map_err(|error| format!("Could not parse the pasted kubeconfig: {error}"))?;
+    validate_imported_kubeconfig(&kubeconfig)?;
+    let canonical = serde_yaml::to_string(&kubeconfig)
+        .map_err(|error| format!("Could not normalize the pasted kubeconfig: {error}"))?;
+    Ok((kubeconfig, persisted, canonical))
+}
+
+fn ensure_managed_kubeconfig_directory(directory: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("Kuberniva's managed kubeconfig path is not a directory".to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(directory)
+                .map_err(|error| format!("Could not create managed kubeconfig storage: {error}"))?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect managed kubeconfig storage: {error}"
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("Could not secure managed kubeconfig storage: {error}"))?;
+    }
+    Ok(())
+}
+
+fn secure_kubeconfig_file(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not secure imported kubeconfig: {error}"))?;
+    }
+    Ok(())
+}
+
+fn kubeconfig_summary_with_source(kubeconfig: &Kubeconfig, source: &Path) -> KubeconfigSummary {
+    let source_path = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    KubeconfigSummary {
+        contexts: contexts_from_kubeconfig(kubeconfig, Some(source_path)),
+        current_context: kubeconfig.current_context.clone(),
+    }
+}
+
+fn managed_kubeconfig_path(managed_directory: &Path, canonical: &str) -> PathBuf {
+    let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+    managed_directory.join(format!("kubeconfig-{digest}.yaml"))
+}
+
+fn atomically_replace_managed_kubeconfig(path: &Path, contents: &str) -> Result<(), String> {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("kubeconfig.yaml");
+    let mut staged = None;
+    for suffix in 0..1_000_u16 {
+        let temporary_path = path.with_file_name(format!(
+            ".{filename}.kuberniva-import-{}-{suffix}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temporary_path) {
+            Ok(file) => {
+                staged = Some((temporary_path, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("Could not stage imported kubeconfig: {error}"));
+            }
+        }
+    }
+    let (temporary_path, mut temporary_file) =
+        staged.ok_or_else(|| "Could not allocate a temporary kubeconfig filename".to_string())?;
+    if let Err(error) = temporary_file
+        .write_all(contents.as_bytes())
+        .and_then(|_| temporary_file.sync_all())
+    {
+        drop(temporary_file);
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!("Could not save imported kubeconfig: {error}"));
+    }
+    drop(temporary_file);
+    if let Err(error) = secure_kubeconfig_file(&temporary_path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    // std::fs::rename replaces an existing destination on Unix, but Windows
+    // requires the destination to be removed first. The import lock keeps this
+    // short replacement window private to Kuberniva's managed store.
+    #[cfg(windows)]
+    if let Err(error) = fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(format!(
+                "Could not replace the previous imported kubeconfig: {error}"
+            ));
+        }
+    }
+    if let Err(error) = fs::rename(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!("Could not install imported kubeconfig: {error}"));
+    }
+    Ok(())
+}
+
+fn import_pasted_kubeconfig_into(
+    kubeconfig_yaml: &str,
+    managed_directory: &Path,
+) -> Result<KubeconfigSummary, String> {
+    let (kubeconfig, persisted, canonical) = parse_pasted_kubeconfig(kubeconfig_yaml)?;
+    let _import_guard = KUBECONFIG_IMPORT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Kuberniva's kubeconfig importer is unavailable".to_string())?;
+    ensure_managed_kubeconfig_directory(managed_directory)?;
+
+    let managed_path = managed_kubeconfig_path(managed_directory, &canonical);
+    match fs::symlink_metadata(&managed_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(
+                    "Kuberniva's digest-owned kubeconfig path is not a regular file".to_string(),
+                );
+            }
+            let existing_matches = fs::read_to_string(&managed_path)
+                .ok()
+                .and_then(|yaml| Kubeconfig::from_yaml(&yaml).ok())
+                .and_then(|existing| serde_yaml::to_string(&existing).ok())
+                .is_some_and(|existing| existing == canonical);
+            if !existing_matches {
+                atomically_replace_managed_kubeconfig(&managed_path, &persisted)?;
+            } else {
+                secure_kubeconfig_file(&managed_path)?;
+            }
+            return Ok(kubeconfig_summary_with_source(&kubeconfig, &managed_path));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Could not inspect the managed kubeconfig destination: {error}"
+            ));
+        }
+    }
+
+    let mut existing_files = fs::read_dir(managed_directory)
+        .map_err(|error| format!("Could not read managed kubeconfig storage: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let filename = entry.file_name();
+            let filename = filename.to_str()?;
+            entry.file_type().ok().filter(|kind| kind.is_file())?;
+            (filename.starts_with("kubeconfig-") && filename.ends_with(".yaml"))
+                .then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    existing_files.sort();
+    for path in existing_files {
+        let Ok(existing_yaml) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(existing) = Kubeconfig::from_yaml(&existing_yaml) else {
+            continue;
+        };
+        let Ok(existing_canonical) = serde_yaml::to_string(&existing) else {
+            continue;
+        };
+        if existing_canonical == canonical {
+            secure_kubeconfig_file(&path)?;
+            return Ok(kubeconfig_summary_with_source(&existing, &path));
+        }
+    }
+    atomically_replace_managed_kubeconfig(&managed_path, &persisted)?;
+    Ok(kubeconfig_summary_with_source(&kubeconfig, &managed_path))
 }
 
 fn category_for(group: &str, plural: &str) -> (String, bool, bool) {
@@ -983,6 +1457,7 @@ async fn client_for(path: Option<String>, context: Option<String>) -> Result<Cli
     {
         return Ok(client);
     }
+
     let options = KubeConfigOptions {
         context,
         ..Default::default()
@@ -1015,6 +1490,21 @@ fn invalidate_cluster_client(
         .map_err(|_| "Kuberniva's Kubernetes client cache is unavailable".to_string())?
         .remove(&cache_key);
     Ok(())
+}
+
+#[tauri::command]
+async fn import_pasted_kubeconfig(
+    app: tauri::AppHandle,
+    content: String,
+) -> Result<KubeconfigSummary, String> {
+    let managed_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate Kuberniva's app data directory: {error}"))?
+        .join("kubeconfigs");
+    tokio::task::spawn_blocking(move || import_pasted_kubeconfig_into(&content, &managed_directory))
+        .await
+        .map_err(|error| format!("Kubeconfig import was interrupted: {error}"))?
 }
 
 #[tauri::command]
@@ -1076,100 +1566,6 @@ fn read_kubeconfig_contexts(kubeconfig_path: Option<String>) -> Result<Kubeconfi
         contexts,
         current_context,
     })
-}
-
-#[tauri::command]
-fn forget_kubeconfig_context(request: ForgetKubeconfigContextRequest) -> Result<(), String> {
-    let kubeconfig_path = resolve_local_path(&request.kubeconfig_path)
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve kubeconfig source: {error}"))?;
-    if !kubeconfig_path.is_file() {
-        return Err("A single kubeconfig file is required to remove a context".to_string());
-    }
-
-    // Parse the source directly instead of Kubeconfig::read_from: that helper resolves
-    // certificate and credential paths, which would rewrite relative paths on save.
-    let source = fs::read_to_string(&kubeconfig_path)
-        .map_err(|error| format!("Could not read kubeconfig source: {error}"))?;
-    let mut kubeconfig: Kubeconfig = serde_yaml::from_str(&source)
-        .map_err(|error| format!("Could not parse kubeconfig source: {error}"))?;
-    let removed_context = kubeconfig
-        .contexts
-        .iter()
-        .find(|candidate| candidate.name == request.context)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "Context `{}` was not found in this kubeconfig",
-                request.context
-            )
-        })?;
-    let removed_cluster = removed_context
-        .context
-        .as_ref()
-        .map(|context| context.cluster.clone());
-    let removed_user = removed_context.context.and_then(|context| context.user);
-
-    kubeconfig
-        .contexts
-        .retain(|candidate| candidate.name != request.context);
-    let referenced_clusters = kubeconfig
-        .contexts
-        .iter()
-        .filter_map(|candidate| {
-            candidate
-                .context
-                .as_ref()
-                .map(|context| context.cluster.clone())
-        })
-        .collect::<HashSet<_>>();
-    let referenced_users = kubeconfig
-        .contexts
-        .iter()
-        .filter_map(|candidate| {
-            candidate
-                .context
-                .as_ref()
-                .and_then(|context| context.user.clone())
-        })
-        .collect::<HashSet<_>>();
-    if let Some(cluster) = removed_cluster {
-        if !referenced_clusters.contains(&cluster) {
-            kubeconfig
-                .clusters
-                .retain(|candidate| candidate.name != cluster);
-        }
-    }
-    if let Some(user) = removed_user {
-        if !referenced_users.contains(&user) {
-            kubeconfig
-                .auth_infos
-                .retain(|candidate| candidate.name != user);
-        }
-    }
-    if kubeconfig.current_context.as_deref() == Some(request.context.as_str()) {
-        kubeconfig.current_context = kubeconfig
-            .contexts
-            .first()
-            .map(|context| context.name.clone());
-    }
-
-    let updated = serde_yaml::to_string(&kubeconfig)
-        .map_err(|error| format!("Could not write kubeconfig: {error}"))?;
-    let temporary_path = kubeconfig_path.with_file_name(format!(
-        ".{}.kuberniva-write-{}",
-        kubeconfig_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("config"),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-    ));
-    fs::write(&temporary_path, updated)
-        .map_err(|error| format!("Could not stage kubeconfig update: {error}"))?;
-    fs::rename(&temporary_path, &kubeconfig_path)
-        .map_err(|error| format!("Could not replace kubeconfig: {error}"))?;
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -1604,6 +2000,140 @@ async fn read_cluster_events(
     Ok(events)
 }
 
+fn dynamic_api_for_request(client: Client, request: &ResourceRequest) -> Api<DynamicObject> {
+    let resource = api_resource(
+        request.group.clone(),
+        request.version.clone(),
+        request.kind.clone(),
+        request.plural.clone(),
+    );
+    if request.namespaced {
+        match request.namespace.as_deref() {
+            Some(namespace) if namespace != "all namespaces" => {
+                Api::namespaced_with(client, namespace, &resource)
+            }
+            _ => Api::all_with(client, &resource),
+        }
+    } else {
+        Api::all_with(client, &resource)
+    }
+}
+
+fn resource_watch_signal(
+    app: &tauri::AppHandle,
+    watch_id: &str,
+    action: &str,
+    error: Option<String>,
+) {
+    let _ = app.emit(
+        "kuberniva://resource-watch",
+        ResourceWatchSignal {
+            watch_id: watch_id.to_string(),
+            action: action.to_string(),
+            error,
+        },
+    );
+}
+
+async fn run_resource_watch(
+    app: tauri::AppHandle,
+    watch_id: String,
+    request: ResourceRequest,
+    mut stop_rx: oneshot::Receiver<()>,
+) {
+    let client = match client_for(request.kubeconfig_path.clone(), request.context.clone()).await {
+        Ok(client) => client,
+        Err(error) => {
+            resource_watch_signal(&app, &watch_id, "error", Some(error));
+            return;
+        }
+    };
+    let api = dynamic_api_for_request(client, &request);
+
+    loop {
+        let watch_params = WatchParams::default().timeout(290);
+        let stream = match api.watch(&watch_params, "0").await {
+            Ok(stream) => stream,
+            Err(error) => {
+                resource_watch_signal(&app, &watch_id, "error", Some(error.to_string()));
+                tokio::select! {
+                    _ = &mut stop_rx => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => continue,
+                }
+            }
+        };
+        futures_util::pin_mut!(stream);
+
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => return,
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(WatchEvent::Added(_))) => resource_watch_signal(&app, &watch_id, "added", None),
+                        Some(Ok(WatchEvent::Modified(_))) => resource_watch_signal(&app, &watch_id, "modified", None),
+                        Some(Ok(WatchEvent::Deleted(_))) => resource_watch_signal(&app, &watch_id, "deleted", None),
+                        Some(Ok(WatchEvent::Bookmark(_))) => {}
+                        Some(Ok(WatchEvent::Error(status))) => {
+                            resource_watch_signal(&app, &watch_id, "error", Some(status.to_string()));
+                            break;
+                        }
+                        Some(Err(error)) => {
+                            resource_watch_signal(&app, &watch_id, "error", Some(error.to_string()));
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        tokio::select! {
+            _ = &mut stop_rx => return,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+#[tauri::command]
+async fn start_resource_watch(
+    app: tauri::AppHandle,
+    request: ResourceRequest,
+) -> Result<String, String> {
+    let watch_id = format!(
+        "resource-watch-{}",
+        NEXT_RESOURCE_WATCH_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let (stop_tx, stop_rx) = oneshot::channel();
+    RESOURCE_WATCH_REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "Kuberniva's resource watch registry is unavailable".to_string())?
+        .insert(watch_id.clone(), stop_tx);
+    let task_watch_id = watch_id.clone();
+    tokio::spawn(async move {
+        run_resource_watch(app, task_watch_id.clone(), request, stop_rx).await;
+        if let Some(registry) = RESOURCE_WATCH_REGISTRY.get() {
+            if let Ok(mut registry) = registry.lock() {
+                registry.remove(&task_watch_id);
+            }
+        }
+    });
+    Ok(watch_id)
+}
+
+#[tauri::command]
+fn stop_resource_watch(watch_id: String) -> Result<(), String> {
+    let sender = RESOURCE_WATCH_REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "Kuberniva's resource watch registry is unavailable".to_string())?
+        .remove(&watch_id);
+    if let Some(sender) = sender {
+        let _ = sender.send(());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn list_resource_objects(request: ResourceRequest) -> Result<Vec<ResourceObject>, String> {
     let client = client_for(request.kubeconfig_path, request.context).await?;
@@ -2005,6 +2535,196 @@ async fn exec_pod_command(request: PodExecRequest) -> Result<PodExecResponse, St
     Ok(response)
 }
 
+fn command_basename(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command)
+}
+
+fn command_is(command: &str, expected: &str) -> bool {
+    command_basename(command).eq_ignore_ascii_case(expected)
+}
+
+fn is_kubectl_shorthand(command: &str) -> bool {
+    matches!(
+        command,
+        "alpha"
+            | "annotate"
+            | "api-resources"
+            | "api-versions"
+            | "apply"
+            | "attach"
+            | "auth"
+            | "autoscale"
+            | "certificate"
+            | "cluster-info"
+            | "completion"
+            | "config"
+            | "cordon"
+            | "cp"
+            | "create"
+            | "debug"
+            | "delete"
+            | "describe"
+            | "diff"
+            | "drain"
+            | "edit"
+            | "events"
+            | "exec"
+            | "explain"
+            | "expose"
+            | "get"
+            | "kustomize"
+            | "label"
+            | "logs"
+            | "patch"
+            | "plugin"
+            | "port-forward"
+            | "proxy"
+            | "replace"
+            | "rollout"
+            | "run"
+            | "scale"
+            | "set"
+            | "taint"
+            | "top"
+            | "uncordon"
+            | "version"
+            | "wait"
+    )
+}
+
+fn command_has_context_flag(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "--context" | "--kubeconfig" | "--namespace" | "-n"
+        ) || token.starts_with("--context=")
+            || token.starts_with("--kubeconfig=")
+            || token.starts_with("--namespace=")
+            || token.starts_with("-n=")
+    })
+}
+
+fn cli_tokens(command: &str) -> Result<Vec<String>, String> {
+    shell_words::split(command).map_err(|error| format!("Could not parse the command: {error}"))
+}
+
+#[tauri::command]
+async fn run_cluster_command(request: KubeCliRequest) -> Result<KubeCliResponse, String> {
+    let command = request.command.trim();
+    if command.is_empty() {
+        return Err("Enter a command, for example: kubectl get pods or helm list".to_string());
+    }
+    if request.context.trim().is_empty() {
+        return Err("Select a cluster context before running the CLI".to_string());
+    }
+    if command.len() > 4_096 {
+        return Err("CLI commands are limited to 4,096 characters".to_string());
+    }
+    let mut tokens = cli_tokens(command)?;
+    if tokens.is_empty() {
+        return Err("Enter a command, for example: kubectl get pods or helm list".to_string());
+    }
+    if tokens.len() > 128 {
+        return Err("CLI commands are limited to 128 arguments".to_string());
+    }
+
+    // Keep the old shorthand useful: entering `get pods` still means
+    // `kubectl get pods`, while a complete executable such as `helm` or
+    // `kustomize` is passed through unchanged.
+    let first_token_is_tool = command_is(&tokens[0], "kubectl")
+        || command_is(&tokens[0], "helm")
+        || tokens[0].contains('/')
+        || tokens[0].contains('\\');
+    if !first_token_is_tool && is_kubectl_shorthand(&tokens[0]) {
+        tokens.insert(0, "kubectl".to_string());
+    }
+
+    configure_desktop_exec_path();
+
+    let tool = tokens[0].clone();
+    let tool_is_kubectl = command_is(&tool, "kubectl");
+    let tool_is_helm = command_is(&tool, "helm");
+    let mut process;
+    if request.shell {
+        // Shell mode is deliberately explicit for pipelines, redirects, and
+        // local helpers. The selected context remains available through
+        // KUBERNIVA_* variables; direct kubectl/helm mode below injects the
+        // corresponding flags so the common case is deterministic.
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        process = TokioCommand::new(shell);
+        process.args(["-lc", command]);
+    } else {
+        let mut args = tokens[1..].to_vec();
+        if tool_is_kubectl || tool_is_helm {
+            if command_has_context_flag(&args) {
+                return Err("Kuberniva supplies the active kubeconfig, context, and namespace automatically. Remove --context/--kubeconfig/--namespace from the command.".to_string());
+            }
+            let mut injected = Vec::with_capacity(args.len() + 7);
+            if let Some(path) = request
+                .kubeconfig_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+            {
+                injected.extend(["--kubeconfig".to_string(), path.to_string()]);
+            }
+            if tool_is_kubectl {
+                injected.extend(["--context".to_string(), request.context.trim().to_string()]);
+            } else {
+                injected.extend([
+                    "--kube-context".to_string(),
+                    request.context.trim().to_string(),
+                ]);
+            }
+            if let Some(namespace) = request
+                .namespace
+                .as_deref()
+                .filter(|namespace| !namespace.trim().is_empty())
+            {
+                injected.extend(["--namespace".to_string(), namespace.trim().to_string()]);
+            }
+            injected.append(&mut args);
+            args = injected;
+        }
+        process = TokioCommand::new(&tool);
+        process.args(args);
+    }
+    if let Some(path) = request
+        .kubeconfig_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        process.env("KUBECONFIG", path);
+        process.env("KUBERNIVA_KUBECONFIG", path);
+    } else {
+        process.env_remove("KUBECONFIG");
+        process.env_remove("KUBERNIVA_KUBECONFIG");
+    }
+    process.env("KUBERNIVA_CONTEXT", request.context.trim());
+    process.env(
+        "KUBERNIVA_NAMESPACE",
+        request.namespace.as_deref().unwrap_or(""),
+    );
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(120), process.output())
+    .await
+    .map_err(|_| "The command did not finish within 120 seconds".to_string())?
+    .map_err(|error| format!("Could not start `{tool}`: {error}. Make sure the command is installed and available on PATH."))?;
+    Ok(KubeCliResponse {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code(),
+        success: output.status.success(),
+    })
+}
+
+#[tauri::command]
+async fn run_kubectl_command(request: KubeCliRequest) -> Result<KubeCliResponse, String> {
+    run_cluster_command(request).await
+}
+
 #[tauri::command]
 async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForwardInfo, String> {
     if request.remote_port == 0 {
@@ -2162,6 +2882,293 @@ mod tests {
         )
     }
 
+    fn multi_context_kubeconfig() -> &'static str {
+        "apiVersion: v1\nkind: Config\nclusters:\n  - name: first\n    cluster:\n      server: https://first.example.invalid\n  - name: second\n    cluster:\n      server: https://second.example.invalid\nusers:\n  - name: first-user\n    user:\n      token: first-token\n  - name: second-user\n    user:\n      token: second-token\ncontexts:\n  - name: first\n    context:\n      cluster: first\n      user: first-user\n  - name: second\n    context:\n      cluster: second\n      user: second-user\ncurrent-context: first\n"
+    }
+
+    fn kubeconfig_with_references(cluster_fields: &str, user_fields: &str) -> String {
+        format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n  - name: referenced\n    cluster:\n      server: https://referenced.example.invalid\n{cluster_fields}users:\n  - name: referenced-user\n    user:\n{user_fields}contexts:\n  - name: referenced\n    context:\n      cluster: referenced\n      user: referenced-user\ncurrent-context: referenced\n"
+        )
+    }
+
+    fn temporary_directory(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after the epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("kuberniva-{prefix}-{suffix}"))
+    }
+
+    #[test]
+    fn rejects_empty_invalid_and_non_kubeconfig_pasted_yaml() {
+        let directory = temporary_directory("paste-invalid");
+
+        let empty = import_pasted_kubeconfig_into("  \n", &directory)
+            .expect_err("empty content must be rejected");
+        assert!(empty.contains("Paste a kubeconfig"));
+
+        let invalid = import_pasted_kubeconfig_into("contexts: [", &directory)
+            .expect_err("invalid YAML must be rejected");
+        assert!(invalid.contains("Could not parse"));
+
+        let wrong_document = import_pasted_kubeconfig_into(
+            "apiVersion: v1\nkind: Pod\nmetadata:\n  name: not-a-config\n",
+            &directory,
+        )
+        .expect_err("a Kubernetes resource must not be treated as a kubeconfig");
+        assert!(wrong_document.contains("not a kubeconfig"));
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn rejects_relative_file_references_in_pasted_kubeconfigs() {
+        let cases = [
+            (
+                kubeconfig_with_references(
+                    "      certificate-authority: ./certs/ca.crt\n",
+                    "      token: test-token\n",
+                ),
+                "certificate-authority",
+            ),
+            (
+                kubeconfig_with_references(
+                    "      certificate-authority: ./certs/ca.crt\n      certificate-authority-data: \"\"\n",
+                    "      token: test-token\n",
+                ),
+                "certificate-authority",
+            ),
+            (
+                kubeconfig_with_references(
+                    "",
+                    "      client-certificate: certs/client.crt\n      token: test-token\n",
+                ),
+                "client-certificate",
+            ),
+            (
+                kubeconfig_with_references(
+                    "",
+                    "      client-certificate: certs/client.crt\n      client-certificate-data: \"\"\n      token: test-token\n",
+                ),
+                "client-certificate",
+            ),
+            (
+                kubeconfig_with_references(
+                    "",
+                    "      client-key: ../keys/client.key\n      token: test-token\n",
+                ),
+                "client-key",
+            ),
+            (
+                kubeconfig_with_references("", "      tokenFile: ./tokens/cluster.token\n"),
+                "tokenFile",
+            ),
+            (
+                kubeconfig_with_references(
+                    "",
+                    "      exec:\n        apiVersion: client.authentication.k8s.io/v1beta1\n        command: ./bin/kubelogin\n",
+                ),
+                "relative exec command",
+            ),
+            (
+                kubeconfig_with_references(
+                    "",
+                    "      auth-provider:\n        name: oidc\n        config:\n          idp-certificate-authority: ./certs/idp-ca.crt\n",
+                ),
+                "idp-certificate-authority",
+            ),
+        ];
+
+        for (yaml, expected) in cases {
+            let error = parse_pasted_kubeconfig(&yaml)
+                .expect_err("relative file reference must be rejected");
+            assert!(
+                error.contains(expected),
+                "expected `{expected}` in `{error}`"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_inline_overrides_and_bare_path_exec_commands() {
+        let yaml = kubeconfig_with_references(
+            "      certificate-authority: ./certs/ca.crt\n      certificate-authority-data: Y2E=\n",
+            "      tokenFile: ./tokens/cluster.token\n      token: test-token\n      client-certificate: ./certs/client.crt\n      client-certificate-data: Y2VydA==\n      client-key: ./keys/client.key\n      client-key-data: a2V5\n      exec:\n        apiVersion: client.authentication.k8s.io/v1beta1\n        command: kubelogin\n      auth-provider:\n        name: oidc\n        config:\n          idp-certificate-authority: ./certs/idp-ca.crt\n          idp-certificate-authority-data: aWRwLWNh\n",
+        );
+
+        parse_pasted_kubeconfig(&yaml)
+            .expect("inline values and a bare PATH command must remain portable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_absolute_file_and_exec_references() {
+        let yaml = kubeconfig_with_references(
+            "      certificate-authority: /absolute/certs/ca.crt\n",
+            "      tokenFile: /absolute/tokens/cluster.token\n      client-certificate: /absolute/certs/client.crt\n      client-key: /absolute/keys/client.key\n      exec:\n        apiVersion: client.authentication.k8s.io/v1beta1\n        command: /absolute/bin/kubelogin\n      auth-provider:\n        name: oidc\n        config:\n          idp-certificate-authority: /absolute/certs/idp-ca.crt\n",
+        );
+
+        parse_pasted_kubeconfig(&yaml).expect("absolute references must remain valid after import");
+    }
+
+    #[test]
+    fn reuses_identical_pasted_kubeconfig_content() {
+        let directory = temporary_directory("paste-reuse");
+        let first = import_pasted_kubeconfig_into(&kubeconfig("cluster-a"), &directory)
+            .expect("import kubeconfig");
+        let second = import_pasted_kubeconfig_into(&kubeconfig("cluster-a"), &directory)
+            .expect("reuse imported kubeconfig");
+        let first_source = first.contexts[0]
+            .source_path
+            .as_deref()
+            .expect("first source path");
+        let second_source = second.contexts[0]
+            .source_path
+            .as_deref()
+            .expect("second source path");
+
+        assert_eq!(first.current_context.as_deref(), Some("cluster-a"));
+        assert_eq!(first_source, second_source);
+        assert!(Path::new(first_source).is_file());
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("read managed directory")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn ignores_hidden_import_staging_files_during_deduplication() {
+        let directory = temporary_directory("paste-hidden-stage");
+        ensure_managed_kubeconfig_directory(&directory).expect("create managed directory");
+        let staged_path = directory.join(".kubeconfig-crash.yaml.kuberniva-import-123-0");
+        fs::write(&staged_path, kubeconfig("cluster-staged")).expect("write staged kubeconfig");
+
+        let summary = import_pasted_kubeconfig_into(&kubeconfig("cluster-staged"), &directory)
+            .expect("import kubeconfig despite hidden staging file");
+        let source_path = Path::new(
+            summary.contexts[0]
+                .source_path
+                .as_deref()
+                .expect("managed source path"),
+        );
+
+        assert_ne!(source_path, staged_path);
+        assert!(source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("kubeconfig-") && name.ends_with(".yaml")));
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("read managed directory")
+                .count(),
+            2
+        );
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secures_managed_pasted_kubeconfig_storage_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_directory("paste-permissions");
+        let summary = import_pasted_kubeconfig_into(&kubeconfig("cluster-secure"), &directory)
+            .expect("import kubeconfig");
+        let source_path = summary.contexts[0]
+            .source_path
+            .as_deref()
+            .expect("source path");
+        let directory_mode = fs::metadata(&directory)
+            .expect("managed directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = fs::metadata(source_path)
+            .expect("managed kubeconfig metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(directory_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn reimporting_identical_digest_owned_kubeconfig_reuses_it_in_place() {
+        let directory = temporary_directory("paste-restore");
+        let first = import_pasted_kubeconfig_into(multi_context_kubeconfig(), &directory)
+            .expect("import multi-context kubeconfig");
+        let original_source = first.contexts[0]
+            .source_path
+            .clone()
+            .expect("managed source path");
+        let restored = import_pasted_kubeconfig_into(multi_context_kubeconfig(), &directory)
+            .expect("reimport original kubeconfig");
+        let restored_source = restored.contexts[0]
+            .source_path
+            .as_deref()
+            .expect("restored source path");
+        let restored_names = restored
+            .contexts
+            .iter()
+            .map(|context| context.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(restored_source, original_source);
+        assert_eq!(restored_names, vec!["first", "second"]);
+        assert_eq!(restored.current_context.as_deref(), Some("first"));
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("read managed directory")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn rejects_a_non_regular_digest_owned_destination() {
+        let directory = temporary_directory("paste-non-regular");
+        let (_, _, canonical) =
+            parse_pasted_kubeconfig(&kubeconfig("cluster-owned")).expect("parse kubeconfig");
+        ensure_managed_kubeconfig_directory(&directory).expect("create managed directory");
+        let managed_path = managed_kubeconfig_path(&directory, &canonical);
+        fs::create_dir(&managed_path).expect("create conflicting directory");
+
+        let error = import_pasted_kubeconfig_into(&kubeconfig("cluster-owned"), &directory)
+            .expect_err("non-regular destination must be rejected");
+        assert!(error.contains("not a regular file"));
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlinked_digest_owned_destination() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temporary_directory("paste-symlink");
+        let (_, _, canonical) =
+            parse_pasted_kubeconfig(&kubeconfig("cluster-owned")).expect("parse kubeconfig");
+        ensure_managed_kubeconfig_directory(&directory).expect("create managed directory");
+        let managed_path = managed_kubeconfig_path(&directory, &canonical);
+        let symlink_target = directory.join("unrelated.yaml");
+        fs::write(&symlink_target, kubeconfig("unrelated")).expect("write symlink target");
+        symlink(&symlink_target, &managed_path).expect("create conflicting symlink");
+
+        let error = import_pasted_kubeconfig_into(&kubeconfig("cluster-owned"), &directory)
+            .expect_err("symlinked destination must be rejected");
+        assert!(error.contains("not a regular file"));
+        assert_eq!(
+            fs::read_to_string(&symlink_target).expect("read untouched target"),
+            kubeconfig("unrelated")
+        );
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
     #[test]
     fn reads_contexts_from_each_kubeconfig_in_a_directory() {
         let suffix = SystemTime::now()
@@ -2292,54 +3299,6 @@ mod tests {
         assert!(error.contains("Install the OIDC helper."));
         fs::remove_file(kubeconfig_path).expect("remove temporary kubeconfig");
     }
-
-    #[test]
-    fn removes_one_context_without_creating_a_backup() {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after the epoch")
-            .as_nanos();
-        let kubeconfig_path = std::env::temp_dir().join(format!("kuberniva-remove-{suffix}.yaml"));
-        let original = "apiVersion: v1\nkind: Config\nclusters:\n  - name: retired\n    cluster:\n      server: https://retired.example.invalid\n  - name: current\n    cluster:\n      server: https://current.example.invalid\nusers:\n  - name: retired-user\n    user:\n      token: retired\n  - name: current-user\n    user:\n      token: current\ncontexts:\n  - name: retired\n    context:\n      cluster: retired\n      user: retired-user\n  - name: current\n    context:\n      cluster: current\n      user: current-user\ncurrent-context: retired\n";
-        fs::write(&kubeconfig_path, original).expect("write kubeconfig");
-
-        forget_kubeconfig_context(ForgetKubeconfigContextRequest {
-            kubeconfig_path: kubeconfig_path.to_string_lossy().into_owned(),
-            context: "retired".to_string(),
-        })
-        .expect("remove retired context");
-        let updated: Kubeconfig = serde_yaml::from_str(
-            &fs::read_to_string(&kubeconfig_path).expect("read updated kubeconfig"),
-        )
-        .expect("parse updated kubeconfig");
-
-        assert_eq!(
-            updated
-                .contexts
-                .iter()
-                .map(|context| context.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["current"]
-        );
-        assert_eq!(
-            updated
-                .clusters
-                .iter()
-                .map(|cluster| cluster.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["current"]
-        );
-        assert_eq!(
-            updated
-                .auth_infos
-                .iter()
-                .map(|user| user.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["current-user"]
-        );
-        assert_eq!(updated.current_context.as_deref(), Some("current"));
-        fs::remove_file(kubeconfig_path).expect("remove temporary kubeconfig");
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2352,12 +3311,14 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            import_pasted_kubeconfig,
             read_kubeconfig_contexts,
-            forget_kubeconfig_context,
             invalidate_cluster_client,
             discover_cluster_catalog,
             read_cluster_overview,
             read_cluster_events,
+            start_resource_watch,
+            stop_resource_watch,
             list_resource_objects,
             get_resource_detail,
             delete_resource_object,
@@ -2367,6 +3328,8 @@ pub fn run() {
             read_pod_logs,
             get_pod_runtime,
             exec_pod_command,
+            run_cluster_command,
+            run_kubectl_command,
             start_port_forward,
             list_port_forwards,
             stop_port_forward
