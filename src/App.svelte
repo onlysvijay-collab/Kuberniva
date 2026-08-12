@@ -46,6 +46,7 @@
   type GlobalSearchResult = { type: 'resource' | 'object'; resource: ResourceDescriptor; object?: ResourceObject; title: string; detail: string };
   type KubeCliResponse = { stdout: string; stderr: string; exitCode?: number; success: boolean };
   type ResourceWatchSignal = { watchId: string; action: string; error?: string };
+  type ResourceWatchStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
   type ClusterSession = { namespace: string; selectedCategory: ResourceCategory | 'All resources'; resourceSearch: string; workloadResource: ResourceDescriptor | null; workloadObjects: ResourceObject[]; workloadSearch: string; clusterOverview: ClusterOverview | null };
   type PersistedWorkspace = { version: 6; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string>; theme?: ThemeMode };
   type DeletionTarget =
@@ -70,7 +71,6 @@
   let restoringWorkspace = true;
   let resourceSearch = '';
   let selectedCategory: ResourceCategory | 'All resources' = 'All resources';
-  let resourceCategoryMoreOpen = false;
   let sidebarWorkloadMenuOpen = false;
   let sidebarResourceMenuOpen = false;
   let sidebarResourceSearch = '';
@@ -167,8 +167,14 @@
   let resourceWatchKey = '';
   let resourceWatchGeneration = 0;
   let resourceWatchRefreshTimer: ReturnType<typeof window.setTimeout> | undefined;
+  let resourceWatchRefreshPending = false;
   let resourceWatchUnlisten: (() => void) | undefined;
+  let resourceWatchListenerReady: Promise<void> | null = null;
   let resourceWatchErrorNotified = false;
+  const resourceWatchSignalBuffer = new Map<string, ResourceWatchSignal>();
+  let resourceWatchStatus: ResourceWatchStatus = 'idle';
+  let lastHiddenAt = 0;
+  let resumeRecoveryTimer: ReturnType<typeof window.setTimeout> | undefined;
   let relatedObject: ResourceObject | null = null;
   let yamlResource: ResourceDescriptor | null = null;
   let yamlObject: ResourceObject | null = null;
@@ -193,8 +199,6 @@
   const themeStorageKey = 'kuberniva.theme.v1';
 
   const resourceCategories: ResourceCategory[] = ['Configuration', 'Access Control', 'Network', 'Gateway APIs', 'Storage', 'Cluster', 'Custom Resources'];
-  const primaryResourceCategories = resourceCategories.slice(0, 4);
-  const overflowResourceCategories = resourceCategories.slice(4);
   let clusters: Cluster[] = [];
   let catalog: ClusterCatalog = { context: '', namespaces: [], resources: [] };
 
@@ -212,16 +216,11 @@
     `${event.reason || ''} ${event.message || ''} ${event.involvedKind || ''} ${event.involvedName || ''} ${event.namespace || ''}`.toLowerCase().includes(eventSearch.toLowerCase()),
   );
   $: resourceWorkspaceResources = catalog.resources.filter((resource) => resource.category !== 'Workloads');
-  $: visibleResources = resourceWorkspaceResources.filter((resource) =>
-    (selectedCategory === 'All resources' || resource.category === selectedCategory) &&
-    resourceSearchText(resource).includes(resourceSearch.toLowerCase()),
-  ).sort((left, right) => left.kind.localeCompare(right.kind));
   $: sidebarVisibleResources = resourceWorkspaceResources.filter((resource) =>
     (sidebarResourceCategory === 'All resources' || resource.category === sidebarResourceCategory) &&
     resourceSearchText(resource).includes(sidebarResourceSearch.toLowerCase()),
   ).sort((left, right) => left.category.localeCompare(right.category) || left.kind.localeCompare(right.kind));
   $: globalSearchResults = buildGlobalSearchResults(commandQuery, resourceWorkspaceResources, selectedResource, resourceObjects, workloadResource, workloadObjects);
-  $: overflowResourceCategorySelected = overflowResourceCategories.includes(selectedCategory as ResourceCategory);
   $: categoryCounts = Object.fromEntries(resourceCategories.map((category) => [category, resourceWorkspaceResources.filter((resource) => resource.category === category).length]));
   $: showClusterWorkspaceControls = Boolean(activeClusterId) && ['Overview', 'Events', 'Resources', 'Workloads', 'Logs', 'CLI'].includes(activeView);
   $: refreshingCurrentView = refreshingCluster || loadingCatalog || (activeView === 'Overview'
@@ -585,10 +584,13 @@
     resourceWatchGeneration += 1;
     if (resourceWatchRefreshTimer) window.clearTimeout(resourceWatchRefreshTimer);
     resourceWatchRefreshTimer = undefined;
+    resourceWatchRefreshPending = false;
     const watchId = resourceWatchId;
     resourceWatchId = '';
     resourceWatchKey = '';
     resourceWatchErrorNotified = false;
+    resourceWatchStatus = 'idle';
+    resourceWatchSignalBuffer.clear();
     if (watchId && '__TAURI_INTERNALS__' in window) {
       void import('@tauri-apps/api/core')
         .then(({ invoke }) => invoke('stop_resource_watch', { watchId }))
@@ -618,12 +620,14 @@
 
   async function startResourceWatch(resource: ResourceDescriptor) {
     if (!activeClusterId || !('__TAURI_INTERNALS__' in window)) return;
-    const watchGeneration = resourceWatchGeneration;
+    if (resourceWatchListenerReady) await resourceWatchListenerReady;
     const requestClusterId = activeClusterId;
     const requestNamespace = namespace;
     const nextWatchKey = `${requestClusterId}\u0000${resourceObjectCacheKey(requestClusterId, resource, requestNamespace)}`;
     if (resourceWatchId && resourceWatchKey === nextWatchKey) return;
-    stopLiveObjectRefresh();
+    if (resourceWatchId) stopLiveObjectRefresh();
+    const watchGeneration = resourceWatchGeneration;
+    resourceWatchStatus = 'connecting';
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const watchId = await invoke<string>('start_resource_watch', {
@@ -644,7 +648,11 @@
       resourceWatchId = watchId;
       resourceWatchKey = nextWatchKey;
       resourceWatchErrorNotified = false;
+      const bufferedSignal = resourceWatchSignalBuffer.get(watchId);
+      resourceWatchSignalBuffer.delete(watchId);
+      if (bufferedSignal) scheduleResourceWatchRefresh(bufferedSignal);
     } catch (error) {
+      resourceWatchStatus = 'error';
       // A resource can be listable without watch permission. Keep the current
       // list usable and surface the limitation once instead of retrying loudly.
       if (!resourceWatchErrorNotified) {
@@ -656,11 +664,19 @@
 
   function scheduleResourceWatchRefresh(signal: ResourceWatchSignal) {
     if (signal.watchId !== resourceWatchId) return;
+    if (signal.action === 'connected') {
+      resourceWatchStatus = 'connected';
+      resourceWatchErrorNotified = false;
+      return;
+    }
     if (signal.error && !resourceWatchErrorNotified) {
       resourceWatchErrorNotified = true;
+      resourceWatchStatus = 'reconnecting';
       notify(`Live updates paused: ${signal.error}`);
     }
+    if (signal.error) resourceWatchStatus = 'reconnecting';
     if (!['added', 'modified', 'deleted'].includes(signal.action)) return;
+    resourceWatchRefreshPending = true;
     if (resourceWatchRefreshTimer) window.clearTimeout(resourceWatchRefreshTimer);
     resourceWatchRefreshTimer = window.setTimeout(() => {
       resourceWatchRefreshTimer = undefined;
@@ -673,6 +689,10 @@
     try {
       const { listen } = await import('@tauri-apps/api/event');
       resourceWatchUnlisten = await listen<ResourceWatchSignal>('kuberniva://resource-watch', ({ payload }) => {
+        if (payload.watchId !== resourceWatchId) {
+          resourceWatchSignalBuffer.set(payload.watchId, payload);
+          return;
+        }
         scheduleResourceWatchRefresh(payload);
       });
     } catch {
@@ -893,7 +913,6 @@
     selectedCategory = category;
     sidebarResourceCategory = category;
     resourceSearch = '';
-    resourceCategoryMoreOpen = false;
     closeSidebarTypeMenus();
     clusterPickerOpen = false;
     selectedResource = null;
@@ -1025,6 +1044,21 @@
       resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
       await openResource(resource, { silent: true });
     }
+  }
+
+  function flushPendingResourceWatchRefresh() {
+    if (!resourceWatchRefreshPending || loadingCatalog || loadingWorkloads || loadingObjects || loadingEditor || savingEditor || loadingYaml || savingYaml || deletingResource) return;
+    resourceWatchRefreshPending = false;
+    void refreshVisibleObjectList();
+  }
+
+  function queueLiveResumeRecovery() {
+    if (!activeClusterId || !['Workloads', 'Resources'].includes(activeView) || refreshingCluster || loadingCatalog) return;
+    if (resumeRecoveryTimer) window.clearTimeout(resumeRecoveryTimer);
+    resumeRecoveryTimer = window.setTimeout(() => {
+      resumeRecoveryTimer = undefined;
+      void refreshCurrentView();
+    }, 250);
   }
 
   async function syncWindowMaximized() {
@@ -1164,7 +1198,6 @@
     // stream, or flyout visually attached when the user changes context.
     clusterPickerOpen = false;
     namespaceOpen = false;
-    resourceCategoryMoreOpen = false;
     closeSidebarTypeMenus();
     commandOpen = false;
     commandQuery = '';
@@ -1263,6 +1296,7 @@
       }
     } finally {
       if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId && !silent) loadingWorkloads = false;
+      flushPendingResourceWatchRefresh();
     }
   }
 
@@ -1278,46 +1312,6 @@
     relatedObject = null;
     await loadWorkloadResource(resource);
     startLiveObjectRefresh();
-  }
-
-  async function openResourceCategoryMore(focusLast = false) {
-    resourceCategoryMoreOpen = true;
-    await tick();
-    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('#resource-category-more-menu [role="menuitemradio"]'));
-    const selected = options.find((option) => option.getAttribute('aria-checked') === 'true');
-    (focusLast ? options.at(-1) : selected || options[0])?.focus();
-  }
-
-  function closeResourceCategoryMore(restoreFocus = false) {
-    resourceCategoryMoreOpen = false;
-    if (restoreFocus) void tick().then(() => document.getElementById('resource-category-more-trigger')?.focus());
-  }
-
-  function handleResourceCategoryMoreTriggerKeydown(event: KeyboardEvent) {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    event.preventDefault();
-    void openResourceCategoryMore(event.key === 'ArrowUp');
-  }
-
-  function handleResourceCategoryMoreKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      closeResourceCategoryMore(true);
-      return;
-    }
-    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('#resource-category-more-menu [role="menuitemradio"]'));
-    if (!options.length) return;
-    const current = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[role="menuitemradio"]') : null;
-    const currentIndex = current ? options.indexOf(current) : -1;
-    let nextIndex: number | null = null;
-    if (event.key === 'ArrowDown') nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % options.length;
-    else if (event.key === 'ArrowUp') nextIndex = currentIndex < 0 ? options.length - 1 : (currentIndex - 1 + options.length) % options.length;
-    else if (current && event.key === 'Home') nextIndex = 0;
-    else if (current && event.key === 'End') nextIndex = options.length - 1;
-    if (nextIndex === null) return;
-    event.preventDefault();
-    options[nextIndex]?.focus();
   }
 
   type SidebarTypeMenu = 'workload' | 'resource';
@@ -1340,7 +1334,6 @@
   async function openSidebarTypeMenu(menu: SidebarTypeMenu, focusLast = false) {
     sidebarWorkloadMenuOpen = menu === 'workload';
     sidebarResourceMenuOpen = menu === 'resource';
-    resourceCategoryMoreOpen = false;
     await tick();
     const options = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${sidebarTypeMenuId(menu)} [role="option"]`));
     if (!options.length) return;
@@ -1357,7 +1350,6 @@
     sidebarWorkloadMenuOpen = menu === 'workload';
     sidebarResourceMenuOpen = menu === 'resource';
     sidebarResourceSearch = '';
-    resourceCategoryMoreOpen = false;
   }
 
   function handleSidebarTypeTriggerKeydown(event: KeyboardEvent, menu: SidebarTypeMenu) {
@@ -2384,13 +2376,12 @@
     applyTheme(loadThemePreference());
     void restoreWorkspace();
     void setupWindowControls();
-    void setupResourceWatchListener();
+    resourceWatchListenerReady = setupResourceWatchListener();
     void syncPortForwards();
     const closeFloatingMenus = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       if (!target?.closest('.cluster-selector')) clusterPickerOpen = false;
       if (!target?.closest('.namespace-picker')) namespaceOpen = false;
-      if (!target?.closest('.resource-category-more')) resourceCategoryMoreOpen = false;
       if (!target?.closest('.sidebar-workload-menu, .sidebar-resource-menu')) closeSidebarTypeMenus();
       if (!target?.closest('.favorite-context-menu, .favorite-shortcut, .favorite-card-open')) favoriteContextMenu = null;
     };
@@ -2405,14 +2396,33 @@
         commandOpen = false;
         commandQuery = '';
       }
-      resourceCategoryMoreOpen = false;
       closeSidebarTypeMenus();
     };
     window.addEventListener('pointerdown', closeFloatingMenus);
     window.addEventListener('keydown', closeFloatingMenusOnEscape);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAt = Date.now();
+        return;
+      }
+      if (lastHiddenAt && Date.now() - lastHiddenAt > 5000) queueLiveResumeRecovery();
+      lastHiddenAt = 0;
+    };
+    const handleWindowFocus = () => {
+      if (lastHiddenAt && Date.now() - lastHiddenAt > 5000) queueLiveResumeRecovery();
+    };
+    const handleNetworkOnline = () => queueLiveResumeRecovery();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('online', handleNetworkOnline);
     return () => {
       window.removeEventListener('pointerdown', closeFloatingMenus);
       window.removeEventListener('keydown', closeFloatingMenusOnEscape);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('online', handleNetworkOnline);
+      if (resumeRecoveryTimer) window.clearTimeout(resumeRecoveryTimer);
+      resumeRecoveryTimer = undefined;
     };
   });
 
@@ -2428,7 +2438,6 @@
     closeYamlEditor();
     clusterPickerOpen = false;
     namespaceOpen = false;
-    resourceCategoryMoreOpen = false;
     closeSidebarTypeMenus();
     activeClusterId = cluster.id;
     activeCluster = cluster.name;
@@ -2748,6 +2757,7 @@
       }
     } finally {
       if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId && !silent) loadingObjects = false;
+      flushPendingResourceWatchRefresh();
     }
   }
 </script>
@@ -3033,41 +3043,18 @@
           {:else if loadingCatalog}
             <div class="connection-error"><strong>Connecting to {activeCluster}…</strong><p>Reading the live API catalog and namespaces.</p></div>
           {:else}
-            <div class="resource-workbench-heading"><div class="resource-workbench-title"><span><Database size={21} strokeWidth={1.8} /></span><div><p class="eyebrow">API explorer</p><h2>Resources</h2><p>Choose a Kubernetes API, inspect its live objects, and act without losing your place.</p></div></div><div class="resource-workbench-stat"><strong>{resourceWorkspaceResources.length}</strong><span>API kinds discovered</span></div></div>
-            <div class="resource-category-tabs" aria-label="Resource categories">
-              <button class:resource-category-active={selectedCategory === 'All resources'} on:click={() => selectResourceCategory('All resources')}>All <b>{resourceWorkspaceResources.length}</b></button>
-              {#each primaryResourceCategories as category}
-                <button class:resource-category-active={selectedCategory === category} title={category} on:click={() => selectResourceCategory(category)}>{category}<b>{categoryCounts[category] || 0}</b></button>
-              {/each}
-              <div class:resource-category-more-open={resourceCategoryMoreOpen} class="resource-category-more">
-                <button id="resource-category-more-trigger" class:resource-category-active={overflowResourceCategorySelected} class="resource-category-more-trigger" type="button" aria-haspopup="menu" aria-expanded={resourceCategoryMoreOpen} aria-controls="resource-category-more-menu" title={overflowResourceCategorySelected ? `Selected: ${selectedCategory}` : 'More resource categories'} on:click={() => (resourceCategoryMoreOpen = !resourceCategoryMoreOpen)} on:keydown={handleResourceCategoryMoreTriggerKeydown}>
-                  <span>More</span>{#if overflowResourceCategorySelected}<em>{selectedCategory === 'Custom Resources' ? 'Custom APIs' : selectedCategory}</em>{/if}<ChevronDown size={14} />
-                </button>
-                {#if resourceCategoryMoreOpen}
-                  <div id="resource-category-more-menu" class="resource-category-more-menu" role="menu" aria-label="More resource categories" tabindex="-1" on:keydown={handleResourceCategoryMoreKeydown}>
-                    <div class="resource-category-more-heading" role="presentation"><strong>More categories</strong><kbd>esc</kbd></div>
-                    {#each overflowResourceCategories as category}
-                      <button type="button" role="menuitemradio" aria-checked={selectedCategory === category} class:resource-category-more-selected={selectedCategory === category} on:click={() => selectResourceCategory(category)}><span><strong>{category === 'Custom Resources' ? 'Custom APIs' : category}</strong><small>{category === 'Cluster' ? 'Cluster-scoped resources' : category === 'Custom Resources' ? 'Installed CRDs and custom APIs' : 'Persistent volumes and storage classes'}</small></span><b>{categoryCounts[category] || 0}</b>{#if selectedCategory === category}<i>✓</i>{/if}</button>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
+            <div class="resource-focus-heading">
+              {#if selectedResource}
+                <div class="resource-focus-title"><span class:custom={selectedResource.crd}>{selectedResource.crd ? '◇' : '○'}</span><div><p class="eyebrow">Live resource</p><h2>{selectedResource.kind}</h2><p>{selectedResource.apiVersion} · {selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'}</p></div></div>
+                <span class:live-list-status-connected={resourceWatchStatus === 'connected'} class:live-list-status-reconnecting={resourceWatchStatus === 'reconnecting' || resourceWatchStatus === 'connecting'} class="live-list-status"><i></i>{resourceWatchStatus === 'connected' ? 'Live' : resourceWatchStatus === 'reconnecting' ? 'Reconnecting' : resourceWatchStatus === 'connecting' ? 'Connecting' : 'Live updates off'}</span>
+              {:else}
+                <div class="resource-focus-title"><span>⌁</span><div><p class="eyebrow">Resource workspace</p><h2>Choose a resource</h2><p>Use the Resources menu in the left sidebar to select an API kind.</p></div></div>
+              {/if}
             </div>
-            <div class="resource-workbench-body">
-              <aside class="resource-kind-browser" aria-label="API resource kinds">
-                <div class="resource-kind-browser-heading resource-pane-heading"><span>01</span><div><strong>Resource types</strong><small>{visibleResources.length} available in {selectedCategory === 'All resources' ? 'all categories' : selectedCategory}</small></div></div>
-                <label class="resource-kind-search"><Search size={15} /><input bind:value={resourceSearch} placeholder="Filter API resources" aria-label="Filter API resources" /></label>
-                <div class="resource-kind-list">
-                  {#if visibleResources.length}
-                    {#each visibleResources as resource}
-                      <button class:resource-kind-active={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} title={`${resource.kind} · ${resource.apiVersion}`} on:click={() => openResource(resource)}><span class:custom={resource.crd}>{resource.crd ? '◇' : '○'}</span><div><strong>{resource.kind}</strong><small>{resource.group || 'core'} · {resource.namespaced ? 'namespaced' : 'cluster-wide'}</small></div></button>
-                    {/each}
-                  {:else}<div class="resource-kind-empty"><strong>No matching API resources</strong><small>Try another category or search term.</small></div>{/if}
-                </div>
-              </aside>
+            <div class="resource-workbench-body resource-workbench-body-focused">
               <aside class="resource-object-browser" aria-label="Resource objects">
                 {#if selectedResource}
-                  <div class="resource-object-heading resource-pane-heading"><span class="resource-pane-step">02</span><div><span class:custom={selectedResource.crd} class="resource-pane-icon">{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind} objects</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
+                  <div class="resource-object-heading resource-pane-heading"><span class="resource-pane-step">01</span><div><span class:custom={selectedResource.crd} class="resource-pane-icon">{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind} objects</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
                   <div class="resource-object-columns" aria-hidden="true"><span></span><span>Name</span><span>Namespace</span><span>Age</span><span>Action</span></div>
                   {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<button aria-busy={selectedResource.kind === 'Pod' && isOpeningLogs('Pod', object)} class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><span class="object-icon">□</span><div class="resource-object-primary"><strong>{object.name}</strong></div><span class="resource-object-namespace">{object.namespace || 'cluster scoped'}</span><small class="resource-object-age">{object.createdAt ? resourceAge(object.createdAt) : '—'}</small><span class="resource-object-action">{selectedResource.kind === 'Pod' ? (isOpeningLogs('Pod', object) ? 'Opening…' : 'Logs →') : 'Open →'}</span></button>{/each}</div>{/if}
                 {:else}
@@ -3076,7 +3063,7 @@
               </aside>
               <aside class="resource-inspector" aria-label="Resource details">
                 <div class="resource-inspector-surface">
-                <div class="resource-details-heading resource-pane-heading"><span>03</span><div><strong>Object details</strong><small>Properties, YAML, and actions</small></div></div>
+                <div class="resource-details-heading resource-pane-heading"><span>02</span><div><strong>Object details</strong><small>Properties, YAML, and actions</small></div></div>
                 {#if editorResource && editorObject}
                   <div class="drawer-heading inspector-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Back to resource objects" on:click={() => closeEditor()}>×</button></div>
                   {#if loadingEditor}
@@ -3172,20 +3159,7 @@
         {:else}
           <section class="workloads-page font-sans">
             <div class:workload-detail-open={(editorResource?.category === 'Workloads' && editorObject !== null) || (workloadDetailMode === 'logs' && logTarget !== null)} class:workload-logs-open={workloadDetailMode === 'logs' && logTarget !== null} class="workload-grid grid min-h-[560px]">
-              <aside class="workload-type-rail" aria-label="Workload resource types">
-                <div class="workload-type-heading"><div><strong>Workload types</strong><small>Loaded on demand</small></div><b>{workloadResources.length}</b></div>
-                <div class="workload-type-list">
-                  {#if workloadResources.length}
-                    {#each workloadResources as resource}
-                      <button class:workload-type-active={workloadResource?.kind === resource.kind} class="workload-type-button" on:click={() => selectWorkloadResource(resource)}><Boxes size={14} /><span>{resource.kind}</span>{#if workloadResource?.kind === resource.kind}<b>{workloadObjects.length}</b>{/if}</button>
-                    {/each}
-                  {:else}
-                    <p>No workload APIs were discovered.</p>
-                  {/if}
-                </div>
-              </aside>
-
-              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
+              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><span class:live-list-status-connected={resourceWatchStatus === 'connected'} class:live-list-status-reconnecting={resourceWatchStatus === 'reconnecting' || resourceWatchStatus === 'connecting'} class="live-list-status"><i></i>{resourceWatchStatus === 'connected' ? 'Live' : resourceWatchStatus === 'reconnecting' ? 'Reconnecting' : resourceWatchStatus === 'connecting' ? 'Connecting' : 'Live updates off'}</span><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
                 {#if loadingWorkloads}
                   <div class="grid min-h-96 place-items-center text-sm text-slate-400"><div class="flex items-center gap-3"><RefreshCw size={18} class="animate-spin text-cyan-300" />Loading {workloadResource?.plural || 'workloads'}…</div></div>
                 {:else if visibleWorkloadObjects.length === 0}

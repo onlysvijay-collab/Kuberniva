@@ -2041,25 +2041,41 @@ async fn run_resource_watch(
     request: ResourceRequest,
     mut stop_rx: oneshot::Receiver<()>,
 ) {
-    let client = match client_for(request.kubeconfig_path.clone(), request.context.clone()).await {
-        Ok(client) => client,
-        Err(error) => {
-            resource_watch_signal(&app, &watch_id, "error", Some(error));
-            return;
-        }
-    };
-    let api = dynamic_api_for_request(client, &request);
-
+    let mut retry_delay = std::time::Duration::from_secs(1);
     loop {
+        let client =
+            match client_for(request.kubeconfig_path.clone(), request.context.clone()).await {
+                Ok(client) => client,
+                Err(error) => {
+                    resource_watch_signal(&app, &watch_id, "error", Some(error));
+                    tokio::select! {
+                        _ = &mut stop_rx => return,
+                        _ = tokio::time::sleep(retry_delay) => {}
+                    }
+                    retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(30));
+                    continue;
+                }
+            };
+        let api = dynamic_api_for_request(client, &request);
         let watch_params = WatchParams::default().timeout(290);
         let stream = match api.watch(&watch_params, "0").await {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                retry_delay = std::time::Duration::from_secs(1);
+                resource_watch_signal(&app, &watch_id, "connected", None);
+                stream
+            }
             Err(error) => {
                 resource_watch_signal(&app, &watch_id, "error", Some(error.to_string()));
+                let _ = invalidate_cluster_client(
+                    request.kubeconfig_path.clone(),
+                    request.context.clone(),
+                );
                 tokio::select! {
                     _ = &mut stop_rx => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => continue,
+                    _ = tokio::time::sleep(retry_delay) => {}
                 }
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(30));
+                continue;
             }
         };
         futures_util::pin_mut!(stream);
@@ -2087,10 +2103,15 @@ async fn run_resource_watch(
             }
         }
 
+        // A watch can survive a laptop sleep long enough to return a stale
+        // transport. Rebuild the client before reconnecting instead of
+        // retrying the dead HTTP connection forever.
+        let _ = invalidate_cluster_client(request.kubeconfig_path.clone(), request.context.clone());
         tokio::select! {
             _ = &mut stop_rx => return,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+            _ = tokio::time::sleep(retry_delay) => {}
         }
+        retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(30));
     }
 }
 
