@@ -1226,7 +1226,19 @@ fn format_cpu_usage(cores: f64) -> String {
     if cores >= 1.0 {
         format!("{cores:.2} cores")
     } else {
-        format!("{}m", (cores * 1_000.0).round() as i64)
+        // Keep sub-core values in the same unit as the rest of the UI.  The
+        // Kubernetes API commonly returns values such as 1m/2m, but those
+        // labels are difficult to compare with node and cluster totals.
+        let rounded = (cores * 1_000.0).round() / 1_000.0;
+        let display = if cores > 0.0 && rounded == 0.0 {
+            "<0.001".to_string()
+        } else {
+            format!("{rounded:.3}")
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        };
+        format!("{display} cores")
     }
 }
 
@@ -3369,6 +3381,14 @@ mod tests {
 
         assert!((cpu - 6.5).abs() < f64::EPSILON);
         assert_eq!(format_memory_usage(memory), "8.5Gi");
+    }
+
+    #[test]
+    fn formats_subcore_cpu_as_decimal_cores() {
+        assert_eq!(format_cpu_usage(0.001), "0.001 cores");
+        assert_eq!(format_cpu_usage(0.002), "0.002 cores");
+        assert_eq!(format_cpu_usage(0.1), "0.1 cores");
+        assert_eq!(format_cpu_usage(1.25), "1.25 cores");
     }
 
     #[test]
