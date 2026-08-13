@@ -1,6 +1,6 @@
 [package]
 name = "kuberniva"
-version = "0.3.0"
+version = "0.3.1"
 description = "A focused Kubernetes control surface"
 authors = ["Kuberniva"]
 license = ""
@@ -25,6 +25,7 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
 kube = { version = "4.2.0", features = ["client", "config", "rustls-tls", "ws"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process"] }

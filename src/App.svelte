@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { Window as TauriWindow } from '@tauri-apps/api/window';
-  import { Bell, Boxes, Cable, ChevronDown, ChevronRight, Command, Container, Database, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, Moon, RefreshCw, Search, ScrollText, Settings2, Star, Sun, Terminal, Workflow } from '@lucide/svelte';
+  import { Bell, Boxes, Cable, Check, ChevronDown, ChevronRight, Command, Container, Copy, Database, Download, LayoutDashboard, Maximize2, Menu, Minimize2, Minus, Moon, RefreshCw, Search, ScrollText, Settings2, Star, Sun, Terminal, Workflow } from '@lucide/svelte';
 
   type View = 'Clusters' | 'Favorites' | 'Overview' | 'Events' | 'Resources' | 'Workloads' | 'Explore' | 'Logs' | 'CLI' | 'Port forwards' | 'Settings';
   type ThemeMode = 'light' | 'dark';
+  type NodeDetailTab = 'Overview' | 'Allocation' | 'Network' | 'Health' | 'Metadata';
   type ResourceCategory = 'Workloads' | 'Configuration' | 'Access Control' | 'Network' | 'Gateway APIs' | 'Storage' | 'Cluster' | 'Custom Resources';
   type ResourceDescriptor = { group: string; version: string; apiVersion: string; kind: string; plural: string; namespaced: boolean; category: ResourceCategory; custom: boolean; crd: boolean };
   type ClusterCatalog = { context: string; namespaces: string[]; resources: ResourceDescriptor[] };
@@ -24,7 +25,8 @@
   type PodLogResponse = { lines: string[]; containers: string[]; selectedContainer?: string; ports: PodPort[] };
   type PodRuntime = { containers: string[]; ports: PodPort[] };
   type PodExecResponse = { stdout: string; stderr: string };
-  type PortForward = { id: string; context?: string; localAddress: string; localPort: number; remotePort: number; namespace: string; pod: string };
+  type PortForward = { id: string; clusterId?: string; context?: string; localAddress: string; localPort: number; remotePort: number; namespace: string; pod: string; active?: boolean; savedKey?: string };
+  type SavedPortForward = { key: string; clusterId: string; context: string; kubeconfigPath?: string; localPort: number; remotePort: number; namespace: string; pod: string };
   type OpeningLogsTarget = { key: string; label: string };
   type LogTarget = { pod: string; namespace: string };
   type CertificateInfo = { expiresAt: string; daysRemaining: number; expired: boolean };
@@ -48,7 +50,7 @@
   type ResourceWatchSignal = { watchId: string; action: string; error?: string };
   type ResourceWatchStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
   type ClusterSession = { namespace: string; selectedCategory: ResourceCategory | 'All resources'; resourceSearch: string; workloadResource: ResourceDescriptor | null; workloadObjects: ResourceObject[]; workloadSearch: string; clusterOverview: ClusterOverview | null };
-  type PersistedWorkspace = { version: 6; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string>; theme?: ThemeMode };
+  type PersistedWorkspace = { version: 7; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string>; portForwards?: SavedPortForward[]; theme?: ThemeMode };
   type DeletionTarget =
     | { type: 'resource'; resource: ResourceDescriptor; object: ResourceObject }
     | { type: 'cluster'; cluster: Cluster };
@@ -94,6 +96,9 @@
   let openingLogsTarget: OpeningLogsTarget | null = null;
   let logViewport: HTMLPreElement;
   let logRefreshTimer: ReturnType<typeof window.setInterval> | undefined;
+  let logCopyResetTimer: ReturnType<typeof window.setTimeout> | undefined;
+  let logsCopied = false;
+  let downloadingLogs = false;
   let logRequestGeneration = 0;
   let logWorkspaceGeneration = 0;
   let portForwardOpen = false;
@@ -101,6 +106,7 @@
   let portForwardRemotePort = '';
   let portForwardLocalPort = '';
   let portForwards: PortForward[] = [];
+  let savedPortForwards: SavedPortForward[] = [];
   let syncingPortForwards = false;
   let stoppingPortForwardId = '';
   let workloadDetailMode: 'overview' | 'terminal' | 'logs' = 'overview';
@@ -149,6 +155,7 @@
   let favoriteRenameId = '';
   let favoriteRenameValue = '';
   let selectedNodeName = '';
+  let nodeDetailTab: NodeDetailTab = 'Overview';
   let clusterEvents: ClusterEvent[] = [];
   let loadingEvents = false;
   let eventsError = '';
@@ -199,6 +206,7 @@
   const themeStorageKey = 'kuberniva.theme.v1';
 
   const resourceCategories: ResourceCategory[] = ['Configuration', 'Access Control', 'Network', 'Gateway APIs', 'Storage', 'Cluster', 'Custom Resources'];
+  const nodeDetailTabs: NodeDetailTab[] = ['Overview', 'Allocation', 'Network', 'Health', 'Metadata'];
   let clusters: Cluster[] = [];
   let catalog: ClusterCatalog = { context: '', namespaces: [], resources: [] };
 
@@ -258,8 +266,9 @@
   // Native listeners can remain active for another context, but the workspace
   // must never imply they belong to the cluster currently being inspected.
   $: activeClusterPortForwards = activeClusterId
-    ? portForwards.filter((forward) => forward.context === activeCluster)
+    ? portForwards.filter((forward) => forward.clusterId ? forward.clusterId === activeClusterId : forward.context === activeCluster)
     : [];
+  $: listeningClusterPortForwards = activeClusterPortForwards.filter((forward) => forward.active !== false);
   $: selectedPodPortForwards = logTarget
     ? activeClusterPortForwards.filter((forward) => forward.pod === logTarget?.pod
       && forward.namespace === logTarget?.namespace)
@@ -339,7 +348,7 @@
     try {
       if (activeClusterId) persistedClusterNamespaces = { ...persistedClusterNamespaces, [activeClusterId]: namespace };
       const workspace: PersistedWorkspace = {
-        version: 6,
+        version: 7,
         sourceConfigured,
         kubeconfigPath,
         kubeconfigPaths: kubeconfigSources,
@@ -357,6 +366,7 @@
               return label ? [[id, label]] : [];
             }),
         ),
+        portForwards: savedPortForwards.filter((forward) => clusters.some((cluster) => cluster.id === forward.clusterId)),
         theme,
       };
       window.localStorage.setItem(workspaceStorageKey, JSON.stringify(workspace));
@@ -380,10 +390,11 @@
         clusterNamespaces?: unknown;
         favoriteClusterIds?: unknown;
         favoriteClusterNames?: unknown;
+        portForwards?: unknown;
         theme?: unknown;
       };
-      if ((parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5 && parsed.version !== 6) || typeof parsed.sourceConfigured !== 'boolean' || typeof parsed.kubeconfigPath !== 'string') return null;
-      const kubeconfigPaths = (parsed.version === 2 || parsed.version === 3 || parsed.version === 4 || parsed.version === 5 || parsed.version === 6) && Array.isArray(parsed.kubeconfigPaths)
+      if ((parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5 && parsed.version !== 6 && parsed.version !== 7) || typeof parsed.sourceConfigured !== 'boolean' || typeof parsed.kubeconfigPath !== 'string') return null;
+      const kubeconfigPaths = parsed.version >= 2 && Array.isArray(parsed.kubeconfigPaths)
         ? [...new Set(parsed.kubeconfigPaths.filter((path): path is string => typeof path === 'string').map((path) => path.trim()))]
         : [parsed.kubeconfigPath.trim()];
       const cachedClusters = Array.isArray(parsed.clusters)
@@ -413,8 +424,34 @@
       const favoriteClusterNames = parsed.favoriteClusterNames && typeof parsed.favoriteClusterNames === 'object' && !Array.isArray(parsed.favoriteClusterNames)
         ? Object.fromEntries(Object.entries(parsed.favoriteClusterNames).filter(([id, label]) => favoriteClusterIds.includes(id) && typeof label === 'string' && label.trim()).map(([id, label]) => [id, String(label).trim().slice(0, 80)]))
         : {};
+      const portForwards = Array.isArray(parsed.portForwards)
+        ? parsed.portForwards.flatMap((candidate) => {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+          const forward = candidate as Partial<SavedPortForward>;
+          if (
+            typeof forward.key !== 'string'
+            || typeof forward.clusterId !== 'string'
+            || !cachedClusters.some((cluster) => cluster.id === forward.clusterId)
+            || typeof forward.context !== 'string'
+            || typeof forward.localPort !== 'number'
+            || typeof forward.remotePort !== 'number'
+            || typeof forward.namespace !== 'string'
+            || typeof forward.pod !== 'string'
+          ) return [];
+          return [{
+            key: forward.key,
+            clusterId: forward.clusterId,
+            context: forward.context,
+            kubeconfigPath: typeof forward.kubeconfigPath === 'string' ? forward.kubeconfigPath : undefined,
+            localPort: forward.localPort,
+            remotePort: forward.remotePort,
+            namespace: forward.namespace,
+            pod: forward.pod,
+          }];
+        })
+        : [];
       const workspace: PersistedWorkspace = {
-        version: 6,
+        version: 7,
         sourceConfigured: parsed.sourceConfigured,
         kubeconfigPath: parsed.kubeconfigPath,
         kubeconfigPaths: kubeconfigPaths.length ? kubeconfigPaths : [''],
@@ -424,6 +461,7 @@
         clusterNamespaces,
         favoriteClusterIds,
         favoriteClusterNames,
+        portForwards,
         theme: parsed.theme === 'dark' ? 'dark' : 'light',
       };
       window.localStorage.setItem(workspaceStorageKey, JSON.stringify(workspace));
@@ -540,6 +578,7 @@
     persistedClusterNamespaces = workspace.clusterNamespaces || {};
     favoriteClusterIds = workspace.favoriteClusterIds || [];
     favoriteClusterNames = workspace.favoriteClusterNames || {};
+    savedPortForwards = workspace.portForwards || [];
     // Startup deliberately restores only the saved local snapshot. It never
     // rescans files or folders, so removed contexts stay removed and opening
     // Kuberniva remains immediate. Source reads happen only through Add or Sync.
@@ -954,6 +993,7 @@
       catalog = response;
       catalogCache.set(requestClusterId, response);
       updateCluster(requestClusterId, { status: 'Connected', tone: 'green' });
+      void syncPortForwards();
       return true;
     } catch (error) {
       if (requestClusterId === activeClusterId) {
@@ -2075,7 +2115,10 @@
 
   function closeLogs(clearOpening = true) {
     if (logRefreshTimer) window.clearInterval(logRefreshTimer);
+    if (logCopyResetTimer) window.clearTimeout(logCopyResetTimer);
     logRefreshTimer = undefined;
+    logCopyResetTimer = undefined;
+    logsCopied = false;
     logWorkspaceGeneration += 1;
     logRequestGeneration += 1;
     if (clearOpening) openingLogsTarget = null;
@@ -2145,6 +2188,80 @@
     }
   }
 
+  async function copyLogs() {
+    const text = logLines.join('\n');
+    if (!text) {
+      notify('There are no log lines to copy yet');
+      return;
+    }
+    try {
+      let copied = false;
+      if ('__TAURI_INTERNALS__' in window) {
+        const { writeText } = await import('@tauri-apps/plugin-clipboard-manager');
+        await writeText(text, { label: 'Kuberniva logs' });
+        copied = true;
+      } else if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        } catch {
+          // Browser previews can deny clipboard access; keep a selection fallback.
+        }
+      }
+      if (!copied) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        textarea.style.pointerEvents = 'none';
+        document.body.appendChild(textarea);
+        textarea.select();
+        copied = document.execCommand('copy');
+        textarea.remove();
+      }
+      if (!copied) throw new Error('The system clipboard did not accept the text');
+      logsCopied = true;
+      if (logCopyResetTimer) window.clearTimeout(logCopyResetTimer);
+      logCopyResetTimer = window.setTimeout(() => {
+        logsCopied = false;
+        logCopyResetTimer = undefined;
+      }, 1_800);
+      notify(`${logLines.length} log line${logLines.length === 1 ? '' : 's'} copied`);
+    } catch (error) {
+      notify(`Could not copy logs: ${String(error)}`);
+    }
+  }
+
+  function logDownloadFilename() {
+    const pod = (logTarget?.pod || 'pod').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    const container = (selectedLogContainer || 'default').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return `${pod}_${container}_${timestamp}.log`;
+  }
+
+  async function downloadLogs() {
+    if (!logLines.length || downloadingLogs) return;
+    const content = `${logLines.join('\n')}\n`;
+    const lineCount = logLines.length;
+    downloadingLogs = true;
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      const path = await save({
+        defaultPath: logDownloadFilename(),
+        filters: [{ name: 'Log file', extensions: ['log', 'txt'] }],
+      });
+      if (!path) return;
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('save_log_file', { request: { path, content } });
+      notify(`Saved ${lineCount} log line${lineCount === 1 ? '' : 's'}`);
+    } catch (error) {
+      notify(`Could not download logs: ${String(error)}`);
+    } finally {
+      downloadingLogs = false;
+    }
+  }
+
   function logPodKey(object: ResourceObject) {
     return `${object.namespace || (namespace === 'all namespaces' ? '' : namespace)}\u0000${object.name}`;
   }
@@ -2200,6 +2317,9 @@
     selectedLogContainer = undefined;
     logContainers = [];
     logPorts = [];
+    logsCopied = false;
+    if (logCopyResetTimer) window.clearTimeout(logCopyResetTimer);
+    logCopyResetTimer = undefined;
     portForwardOpen = false;
     portForwardRemotePort = '';
     portForwardLocalPort = '';
@@ -2224,12 +2344,90 @@
     syncingPortForwards = true;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      portForwards = await invoke<PortForward[]>('list_port_forwards');
+      let activeForwards = await invoke<PortForward[]>('list_port_forwards');
+      const configuredForCluster = activeClusterId
+        ? savedPortForwards.filter((forward) => forward.clusterId === activeClusterId)
+        : [];
+      const resumeErrors: string[] = [];
+      for (const saved of configuredForCluster) {
+        if (activeForwards.some((forward) => portForwardMatchesSaved(forward, saved))) continue;
+        try {
+          const resumed = await invoke<PortForward>('start_port_forward', {
+            request: {
+              kubeconfigPath: saved.kubeconfigPath || null,
+              clusterId: saved.clusterId,
+              context: saved.context,
+              namespace: saved.namespace,
+              pod: saved.pod,
+              remotePort: saved.remotePort,
+              localPort: saved.localPort,
+            },
+          });
+          activeForwards = [...activeForwards, resumed];
+        } catch (error) {
+          resumeErrors.push(`${saved.pod}:${saved.remotePort} — ${String(error)}`);
+        }
+      }
+      const activeWithIdentity = activeForwards.map((forward) => {
+        const saved = savedPortForwards.find((candidate) => portForwardMatchesSaved(forward, candidate));
+        return { ...forward, clusterId: forward.clusterId || saved?.clusterId, active: true, savedKey: saved?.key };
+      });
+      const pending = savedPortForwards
+        .filter((saved) => !activeWithIdentity.some((forward) => portForwardMatchesSaved(forward, saved)))
+        .map((saved): PortForward => ({
+          id: `saved:${saved.key}`,
+          savedKey: saved.key,
+          clusterId: saved.clusterId,
+          context: saved.context,
+          localAddress: `127.0.0.1:${saved.localPort}`,
+          localPort: saved.localPort,
+          remotePort: saved.remotePort,
+          namespace: saved.namespace,
+          pod: saved.pod,
+          active: false,
+        }));
+      portForwards = [...activeWithIdentity, ...pending];
+      if (showError && resumeErrors.length) notify(`Could not resume ${resumeErrors[0]}`);
     } catch (error) {
       if (showError) notify(`Could not check port forwards: ${String(error)}`);
     } finally {
       syncingPortForwards = false;
     }
+  }
+
+  function savedPortForwardKey(clusterId: string, namespace: string, pod: string, localPort: number, remotePort: number) {
+    return [clusterId, namespace, pod, localPort, remotePort].join('\u0000');
+  }
+
+  function portForwardMatchesSaved(forward: PortForward, saved: SavedPortForward) {
+    return (!forward.clusterId || forward.clusterId === saved.clusterId)
+      && forward.context === saved.context
+      && forward.namespace === saved.namespace
+      && forward.pod === saved.pod
+      && forward.localPort === saved.localPort
+      && forward.remotePort === saved.remotePort;
+  }
+
+  function rememberSavedPortForward(forward: PortForward) {
+    if (!activeClusterId || !forward.context) return;
+    const key = savedPortForwardKey(activeClusterId, forward.namespace, forward.pod, forward.localPort, forward.remotePort);
+    const saved: SavedPortForward = {
+      key,
+      clusterId: activeClusterId,
+      context: forward.context,
+      kubeconfigPath: activeKubeconfigPath || kubeconfigPath || undefined,
+      localPort: forward.localPort,
+      remotePort: forward.remotePort,
+      namespace: forward.namespace,
+      pod: forward.pod,
+    };
+    savedPortForwards = [...savedPortForwards.filter((candidate) => candidate.key !== key), saved];
+    persistWorkspace();
+  }
+
+  function forgetSavedPortForward(forward: PortForward) {
+    savedPortForwards = savedPortForwards.filter((saved) => saved.key !== forward.savedKey && !portForwardMatchesSaved(forward, saved));
+    persistWorkspace();
   }
 
   function validPort(value: string) {
@@ -2251,6 +2449,7 @@
       const forward = await invoke<PortForward>('start_port_forward', {
         request: {
           kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
+          clusterId: activeClusterId,
           context: activeCluster,
           namespace: logTarget.namespace,
           pod: logTarget.pod,
@@ -2258,7 +2457,8 @@
           localPort,
         },
       });
-      portForwards = [...portForwards.filter((candidate) => candidate.id !== forward.id), forward];
+      rememberSavedPortForward({ ...forward, clusterId: activeClusterId });
+      portForwards = [...portForwards.filter((candidate) => candidate.id !== forward.id), { ...forward, clusterId: activeClusterId, active: true }];
       await syncPortForwards();
       portForwardOpen = false;
       notify(`Forwarding ${logTarget.pod}:${remotePort} on ${forward.localAddress}`);
@@ -2269,13 +2469,18 @@
     }
   }
 
-  async function stopPortForward(id: string) {
+  async function stopPortForward(forward: PortForward) {
     if (stoppingPortForwardId) return;
-    stoppingPortForwardId = id;
+    stoppingPortForwardId = forward.id;
+    // Stop is the explicit owner action: forget the desired forward even if
+    // the native listener disappeared before the command reached it.
+    forgetSavedPortForward(forward);
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke<PortForward>('stop_port_forward', { request: { id } });
-      portForwards = portForwards.filter((forward) => forward.id !== id);
+      if (forward.active !== false) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke<PortForward>('stop_port_forward', { request: { id: forward.id } });
+      }
+      portForwards = portForwards.filter((candidate) => candidate.id !== forward.id);
       notify('Port forward stopped');
     } catch (error) {
       await syncPortForwards();
@@ -2457,6 +2662,7 @@
       catalog = cachedCatalog;
       updateCluster(cluster.id, { status: 'Connected', tone: 'green' });
       notify(`Switched to ${cluster.name} · ${catalog.resources.length} resources`);
+      void syncPortForwards();
       if (activeView === 'Overview') {
         void loadClusterOverview();
         startOverviewRefresh();
@@ -2476,6 +2682,7 @@
       catalogCache.set(cluster.id, catalog);
       updateCluster(cluster.id, { status: 'Connected', tone: 'green' });
       notify(`Connected to ${cluster.name} · ${catalog.resources.length} resources discovered`);
+      void syncPortForwards();
       if (activeView === 'Overview') {
         void loadClusterOverview();
         startOverviewRefresh();
@@ -2500,6 +2707,7 @@
     closeEditor();
     closeYamlEditor();
     selectedResource = null;
+    nodeDetailTab = 'Overview';
     activeView = 'Overview';
     await loadCluster(cluster);
   }
@@ -2998,7 +3206,7 @@
               <div class="node-workbench">
                 <aside class="node-list" aria-label="Cluster nodes">
                   {#each clusterOverview.nodes as node}
-                    <button class:node-list-active={node.name === selectedNode?.name} on:click={() => (selectedNodeName = node.name)}>
+                    <button class:node-list-active={node.name === selectedNode?.name} on:click={() => { selectedNodeName = node.name; nodeDetailTab = 'Overview'; }}>
                       <span class="node-list-mark"><i class:ready={node.ready}></i></span>
                       <span><strong>{node.name}</strong><small>{node.roles.length ? node.roles.join(' · ') : 'Worker node'} · {node.architecture || 'architecture unavailable'}</small></span>
                       <b>›</b>
@@ -3008,22 +3216,30 @@
                 {#if selectedNode}
                   <div class="node-inspector">
                     <div class="node-inspector-heading"><div><p class="eyebrow">Node details</p><h3>{selectedNode.name}</h3><p>{selectedNode.ready ? 'Ready and accepting workloads' : 'Not ready · scheduling may be affected'}</p></div><span class:node-inspector-not-ready={!selectedNode.ready} class="node-inspector-status">{selectedNode.ready ? 'Ready' : 'Not ready'}</span></div>
-                    <div class="node-detail-grid">
-                      <div><span>Architecture</span><strong>{selectedNode.architecture || '—'}</strong></div><div><span>OS image</span><strong>{selectedNode.osImage || '—'}</strong></div><div><span>Kubelet</span><strong>{selectedNode.kubeletVersion || '—'}</strong></div><div><span>Runtime</span><strong>{selectedNode.containerRuntimeVersion || '—'}</strong></div>
+                    <div class="node-detail-tabs" role="tablist" aria-label="Node detail sections">
+                      {#each nodeDetailTabs as tab}
+                        <button class:node-detail-tab-active={nodeDetailTab === tab} role="tab" aria-selected={nodeDetailTab === tab} on:click={() => (nodeDetailTab = tab)}>{tab}</button>
+                      {/each}
                     </div>
-                    <div class="node-metrics-grid">
-                      <section class="node-metric-card node-metric-cpu"><div class="node-metric-heading"><span>CPU usage</span><strong>{selectedNode.cpuUsage || '—'}</strong><b>{usagePercentLabel(selectedNode.cpuUsagePercent)}</b></div>{#if selectedNode.cpuUsagePercent !== undefined}<div class="usage-meter" aria-label={`CPU ${usagePercentLabel(selectedNode.cpuUsagePercent)}`}><i style:width={`${selectedNode.cpuUsagePercent}%`}></i></div>{/if}<small>{selectedNode.cpuUsage ? `${selectedNode.cpuUsage} used of ${selectedNode.cpuCapacity || 'unknown capacity'} · ${remainingPercentLabel(selectedNode.cpuUsagePercent)}` : `Capacity ${selectedNode.cpuCapacity || 'unavailable'}`}</small></section>
-                      <section class="node-metric-card node-metric-memory"><div class="node-metric-heading"><span>Memory usage</span><strong>{selectedNode.memoryUsage || '—'}</strong><b>{usagePercentLabel(selectedNode.memoryUsagePercent)}</b></div>{#if selectedNode.memoryUsagePercent !== undefined}<div class="usage-meter memory-meter" aria-label={`Memory ${usagePercentLabel(selectedNode.memoryUsagePercent)}`}><i style:width={`${selectedNode.memoryUsagePercent}%`}></i></div>{/if}<small>{selectedNode.memoryUsage ? `${selectedNode.memoryUsage} used of ${selectedNode.memoryCapacity || 'unknown capacity'} · ${remainingPercentLabel(selectedNode.memoryUsagePercent)}` : `Capacity ${selectedNode.memoryCapacity || 'unavailable'}`}</small></section>
+                    <div class="node-detail-tab-panel" role="tabpanel">
+                      {#if nodeDetailTab === 'Overview'}
+                        <div class="node-detail-grid">
+                          <div><span>Architecture</span><strong>{selectedNode.architecture || '—'}</strong></div><div><span>OS image</span><strong>{selectedNode.osImage || '—'}</strong></div><div><span>Kubelet</span><strong>{selectedNode.kubeletVersion || '—'}</strong></div><div><span>Runtime</span><strong>{selectedNode.containerRuntimeVersion || '—'}</strong></div>
+                        </div>
+                        <div class="node-metrics-grid">
+                          <section class="node-metric-card node-metric-cpu"><div class="node-metric-heading"><span>CPU usage</span><strong>{selectedNode.cpuUsage || '—'}</strong><b>{usagePercentLabel(selectedNode.cpuUsagePercent)}</b></div>{#if selectedNode.cpuUsagePercent !== undefined}<div class="usage-meter" aria-label={`CPU ${usagePercentLabel(selectedNode.cpuUsagePercent)}`}><i style:width={`${selectedNode.cpuUsagePercent}%`}></i></div>{/if}<small>{selectedNode.cpuUsage ? `${selectedNode.cpuUsage} used of ${selectedNode.cpuCapacity || 'unknown capacity'} · ${remainingPercentLabel(selectedNode.cpuUsagePercent)}` : `Capacity ${selectedNode.cpuCapacity || 'unavailable'}`}</small></section>
+                          <section class="node-metric-card node-metric-memory"><div class="node-metric-heading"><span>Memory usage</span><strong>{selectedNode.memoryUsage || '—'}</strong><b>{usagePercentLabel(selectedNode.memoryUsagePercent)}</b></div>{#if selectedNode.memoryUsagePercent !== undefined}<div class="usage-meter memory-meter" aria-label={`Memory ${usagePercentLabel(selectedNode.memoryUsagePercent)}`}><i style:width={`${selectedNode.memoryUsagePercent}%`}></i></div>{/if}<small>{selectedNode.memoryUsage ? `${selectedNode.memoryUsage} used of ${selectedNode.memoryCapacity || 'unknown capacity'} · ${remainingPercentLabel(selectedNode.memoryUsagePercent)}` : `Capacity ${selectedNode.memoryCapacity || 'unavailable'}`}</small></section>
+                        </div>
+                      {:else if nodeDetailTab === 'Allocation'}
+                        <section class="node-detail-section node-detail-section-expanded"><div class="node-detail-section-heading"><strong>Capacity & allocation</strong><small>{selectedNode.unschedulable ? 'Cordoned' : 'Schedulable'}</small></div><div class="node-property-list">{#each selectedNode.capacity as property}<div><span>{property.key}</span><strong>{property.value}</strong><small>allocatable {selectedNode.allocatable.find((candidate) => candidate.key === property.key)?.value || '—'}</small></div>{/each}</div></section>
+                      {:else if nodeDetailTab === 'Network'}
+                        <section class="node-detail-section node-detail-section-expanded"><div class="node-detail-section-heading"><strong>Network & identity</strong><small>{selectedNode.podCidrs.length ? selectedNode.podCidrs.join(' · ') : 'Pod CIDR unavailable'}</small></div><div class="node-property-list">{#each selectedNode.addresses as address}<div><span>{address.type}</span><strong>{address.address}</strong></div>{/each}{#if selectedNode.providerId}<div><span>Provider</span><strong>{selectedNode.providerId}</strong></div>{/if}{#if selectedNode.uid}<div><span>UID</span><strong>{selectedNode.uid}</strong></div>{/if}</div></section>
+                      {:else if nodeDetailTab === 'Health'}
+                        <div class="node-detail-columns node-health-grid"><section class="node-detail-section"><div class="node-detail-section-heading"><strong>Conditions</strong><small>{selectedNode.conditions.length}</small></div><div class="node-condition-list">{#each selectedNode.conditions as condition}<div><span class:condition-false={condition.status !== 'True'}>{condition.status === 'True' ? '●' : '○'}</span><strong>{condition.type}</strong><small>{condition.reason || condition.message || condition.status}</small></div>{/each}</div></section><section class="node-detail-section"><div class="node-detail-section-heading"><strong>Taints</strong><small>{selectedNode.taints.length}</small></div>{#if selectedNode.taints.length}<div class="node-condition-list">{#each selectedNode.taints as taint}<div><span class="condition-false">!</span><strong>{taint.key}</strong><small>{taint.value ? `${taint.value} · ` : ''}{taint.effect}</small></div>{/each}</div>{:else}<p class="node-detail-empty">No taints are currently applied.</p>{/if}</section></div>
+                      {:else}
+                        <div class="node-metadata-panel"><section><div class="node-detail-section-heading"><strong>Labels</strong><small>{selectedNode.labels.length}</small></div>{#if selectedNode.labels.length}<div class="node-metadata-grid">{#each selectedNode.labels as property}<span><b>{property.key}</b><em>{property.value}</em></span>{/each}</div>{:else}<p class="node-detail-empty">No labels were returned.</p>{/if}</section><section><div class="node-detail-section-heading"><strong>Annotations</strong><small>{selectedNode.annotations.length}</small></div>{#if selectedNode.annotations.length}<div class="node-metadata-grid">{#each selectedNode.annotations as property}<span><b>{property.key}</b><em>{property.value}</em></span>{/each}</div>{:else}<p class="node-detail-empty">No annotations were returned.</p>{/if}</section></div>
+                      {/if}
                     </div>
-                    <div class="node-detail-columns">
-                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Capacity & allocation</strong><small>{selectedNode.unschedulable ? 'Cordoned' : 'Schedulable'}</small></div><div class="node-property-list">{#each selectedNode.capacity as property}<div><span>{property.key}</span><strong>{property.value}</strong><small>allocatable {selectedNode.allocatable.find((candidate) => candidate.key === property.key)?.value || '—'}</small></div>{/each}</div></section>
-                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Network & identity</strong><small>{selectedNode.podCidrs.length ? selectedNode.podCidrs.join(' · ') : 'Pod CIDR unavailable'}</small></div><div class="node-property-list">{#each selectedNode.addresses as address}<div><span>{address.type}</span><strong>{address.address}</strong></div>{/each}{#if selectedNode.providerId}<div><span>Provider</span><strong>{selectedNode.providerId}</strong></div>{/if}{#if selectedNode.uid}<div><span>UID</span><strong>{selectedNode.uid}</strong></div>{/if}</div></section>
-                    </div>
-                    <div class="node-detail-columns">
-                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Conditions</strong><small>{selectedNode.conditions.length}</small></div><div class="node-condition-list">{#each selectedNode.conditions as condition}<div><span class:condition-false={condition.status !== 'True'}>{condition.status === 'True' ? '●' : '○'}</span><strong>{condition.type}</strong><small>{condition.reason || condition.message || condition.status}</small></div>{/each}</div></section>
-                      <section class="node-detail-section"><div class="node-detail-section-heading"><strong>Taints</strong><small>{selectedNode.taints.length}</small></div>{#if selectedNode.taints.length}<div class="node-condition-list">{#each selectedNode.taints as taint}<div><span class="condition-false">!</span><strong>{taint.key}</strong><small>{taint.value ? `${taint.value} · ` : ''}{taint.effect}</small></div>{/each}</div>{:else}<p class="node-detail-empty">No taints are currently applied.</p>{/if}</section>
-                    </div>
-                    {#if selectedNode.labels.length}<details class="node-metadata"><summary>Labels & metadata <span>{selectedNode.labels.length} labels</span></summary><div class="node-metadata-grid">{#each selectedNode.labels as property}<span><b>{property.key}</b><em>{property.value}</em></span>{/each}</div></details>{/if}
                   </div>
                 {/if}
               </div>
@@ -3139,16 +3355,16 @@
         </section>
       {:else if activeView === 'Port forwards'}
         <section class="port-forwards-page panel">
-          <div class="port-forwards-heading"><div class="port-forwards-heading-mark"><Cable size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Local listeners</p><h2>Port forwarding</h2><p>Listeners shown here belong only to {activeClusterId ? activeCluster : 'the selected cluster'} and remain active until you stop them or quit Kuberniva.</p></div><div class:port-forward-summary-active={activeClusterPortForwards.length > 0} class="port-forward-summary"><span class="port-forward-listening-dot"></span><strong>{activeClusterPortForwards.length}</strong><small>{activeClusterPortForwards.length === 1 ? 'active listener' : 'active listeners'}</small></div><button class="secondary port-forward-refresh" disabled={syncingPortForwards} on:click={() => syncPortForwards(true)}><RefreshCw size={15} class={syncingPortForwards ? 'animate-spin' : ''} />{syncingPortForwards ? 'Checking…' : 'Check status'}</button></div>
+          <div class="port-forwards-heading"><div class="port-forwards-heading-mark"><Cable size={22} strokeWidth={1.8} /></div><div><p class="eyebrow">Local listeners</p><h2>Port forwarding</h2><p>Forwards for {activeClusterId ? activeCluster : 'the selected cluster'} are saved locally and resume after Kuberniva reopens and this cluster reconnects.</p></div><div class:port-forward-summary-active={listeningClusterPortForwards.length > 0} class="port-forward-summary"><span class:port-forward-paused-dot={listeningClusterPortForwards.length === 0} class="port-forward-listening-dot"></span><strong>{listeningClusterPortForwards.length}/{activeClusterPortForwards.length}</strong><small>listening / saved</small></div><button class="secondary port-forward-refresh" disabled={syncingPortForwards} on:click={() => syncPortForwards(true)}><RefreshCw size={15} class={syncingPortForwards ? 'animate-spin' : ''} />{syncingPortForwards ? 'Checking…' : 'Check status'}</button></div>
           {#if syncingPortForwards && activeClusterPortForwards.length === 0}
             <div class="port-forward-page-state"><RefreshCw size={21} class="animate-spin" /><strong>Checking native listeners…</strong></div>
           {:else if activeClusterPortForwards.length === 0}
-            <div class="port-forward-page-empty"><span><Cable size={24} strokeWidth={1.7} /></span><h3>No active port forwards for this cluster</h3><p>Open a Pod’s logs and choose <strong>Forward</strong>. Only listeners from {activeClusterId ? activeCluster : 'the selected cluster'} appear here.</p><button class="primary" on:click={() => navigateTo('Workloads')}>Browse workloads</button></div>
+            <div class="port-forward-page-empty"><span><Cable size={24} strokeWidth={1.7} /></span><h3>No saved port forwards for this cluster</h3><p>Open a Pod’s logs and choose <strong>Forward</strong>. Kuberniva will remember it locally until you stop it.</p><button class="primary" on:click={() => navigateTo('Workloads')}>Browse workloads</button></div>
           {:else}
-            <div class="port-forward-table" role="table" aria-label="Active port forwards">
+            <div class="port-forward-table" role="table" aria-label="Saved port forwards">
               <div class="port-forward-table-header" role="row"><span>Status</span><span>Local listener</span><span>Pod target</span><span>Cluster context</span><span>Action</span></div>
               {#each activeClusterPortForwards as forward}
-                <div class="port-forward-table-row" role="row"><div class="port-forward-status"><span class="port-forward-listening-dot"></span><strong>Listening</strong></div><div class="port-forward-endpoint"><strong>{forward.localAddress}</strong><small>localhost:{forward.localPort}</small></div><div class="port-forward-endpoint"><strong>{forward.namespace}/{forward.pod}</strong><small>Remote port {forward.remotePort}</small></div><div class="port-forward-context"><strong>{forward.context || 'Current context'}</strong><small>Native Kubernetes tunnel</small></div><button class="port-forward-stop" disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop forward'}</button></div>
+                <div class:port-forward-table-row-paused={forward.active === false} class="port-forward-table-row" role="row"><div class="port-forward-status"><span class:port-forward-paused-dot={forward.active === false} class="port-forward-listening-dot"></span><strong>{forward.active === false ? 'Saved' : 'Listening'}</strong></div><div class="port-forward-endpoint"><strong>{forward.localAddress}</strong><small>localhost:{forward.localPort}</small></div><div class="port-forward-endpoint"><strong>{forward.namespace}/{forward.pod}</strong><small>Remote port {forward.remotePort}</small></div><div class="port-forward-context"><strong>{forward.context || 'Current context'}</strong><small>{forward.active === false ? 'Will resume on reconnect' : 'Native Kubernetes tunnel'}</small></div><button class="port-forward-stop" disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop forward'}</button></div>
               {/each}
             </div>
           {/if}
@@ -3197,11 +3413,11 @@
                   <div class="workload-inspector-heading workload-log-heading"><div><p class="eyebrow">Live logs</p><h3>{logTarget.pod}</h3><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="workload-inspector-actions"><button class="secondary workload-log-back" on:click={closeWorkloadLogs}>← Details</button><button aria-label="Close logs" on:click={closeWorkloadLogs}>×</button></div></div>
                   <div class="workload-log-body">
                     <section class="workload-log-pod-picker"><div><div><strong>Pod stream</strong><small>{logPods.length} available for this workload</small></div><label>Switch Pod<select value={logTargetKey(logTarget)} on:change={(event) => selectLogPodByKey(event.currentTarget.value)}>{#each logPods as pod}<option value={logPodKey(pod)}>{pod.name} · {pod.namespace || namespace}</option>{/each}</select></label></div></section>
-                    <section class="workload-log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first stream…' : loadingLogs ? 'Refreshing…' : 'Refreshes every 30 seconds · scroll up to hold your place'}</small></div><div class="workload-log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class:port-forward-open={portForwardOpen} class="port-forward-button" on:click={openPortForwardForm}>⇄ Forward</button></div></section>
+                    <section class="workload-log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first stream…' : loadingLogs ? 'Refreshing now…' : 'Auto-refreshes every 30 seconds · select, copy, or download'}</small></div><div class="workload-log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class="log-tool-button" disabled={loadingLogs || !logTarget} aria-label="Refresh logs now" title="Refresh logs now" on:click={() => loadLogs(true)}><RefreshCw size={13} class={loadingLogs ? 'animate-spin' : ''} /><span>{loadingLogs ? 'Refreshing' : 'Refresh'}</span></button><button class:log-tool-button-copied={logsCopied} class="log-tool-button" disabled={!logLines.length} aria-label="Copy all logs" title="Copy all logs" on:click={copyLogs}>{#if logsCopied}<Check size={13} />{:else}<Copy size={13} />{/if}<span>{logsCopied ? 'Copied' : 'Copy'}</span></button><button class="log-tool-button" disabled={!logLines.length || downloadingLogs} aria-label="Download current logs" title="Download current logs" on:click={downloadLogs}><Download size={13} /><span>{downloadingLogs ? 'Saving' : 'Download'}</span></button><button class:port-forward-open={portForwardOpen} class="port-forward-button" on:click={openPortForwardForm}>⇄ Forward</button></div></section>
                     {#if logPorts.length}<section class="workload-log-ports"><strong>Container ports</strong><div>{#each logPorts as port}<span title={`${port.container}${port.name ? ` · ${port.name}` : ''} · ${port.protocol}`}>{port.port}/{port.protocol}<small>{port.container}</small></span>{/each}</div></section>{/if}
                     {#if portForwardOpen}<section class="port-forward-form workload-log-forward-form"><div><strong>Port forward</strong><button aria-label="Close port forward" on:click={() => (portForwardOpen = false)}>×</button></div><p>Expose {logTarget.pod} only on this Mac.</p><label>Remote port<input list="kuberniva-pod-ports" type="number" min="1" max="65535" bind:value={portForwardRemotePort} placeholder="e.g. 8080" /></label><datalist id="kuberniva-pod-ports">{#each suggestedForwardPorts as port}<option value={port}></option>{/each}</datalist><label>Local port<input type="number" min="1" max="65535" bind:value={portForwardLocalPort} placeholder="e.g. 8080" /></label><button class="primary" disabled={portForwarding} on:click={startPortForward}>{portForwarding ? 'Starting…' : 'Start forward'}</button></section>{/if}
-                    {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Active forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>Local → {forward.remotePort}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
-                    {#if loadingLogs && logLines.length === 0}<div class="workload-log-opening"><RefreshCw size={18} class="animate-spin" /><div><strong>Opening logs…</strong><small>Connecting to {logTarget.pod}{selectedLogContainer ? ` · ${selectedLogContainer}` : ''}</small></div></div>{:else}<pre bind:this={logViewport} class="workload-log-output">{logLines.length ? logLines.join('\n') : 'No log lines returned yet.'}</pre>{/if}
+                    {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Saved forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class:port-forward-paused-dot={forward.active === false} class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>{forward.active === false ? 'Saved · resumes on reconnect' : `Local → ${forward.remotePort}`}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
+                    {#if loadingLogs && logLines.length === 0}<div class="workload-log-opening"><RefreshCw size={18} class="animate-spin" /><div><strong>Opening logs…</strong><small>Connecting to {logTarget.pod}{selectedLogContainer ? ` · ${selectedLogContainer}` : ''}</small></div></div>{:else}<pre bind:this={logViewport} class="workload-log-output" aria-label={`${logTarget.pod} logs`}>{logLines.length ? logLines.join('\n') : 'No log lines returned yet.'}</pre>{/if}
                   </div>
                 </aside>
               {:else if editorResource && editorObject && editorResource.category === 'Workloads'}
@@ -3247,13 +3463,13 @@
               <div class="log-pod-list">{#each logPods as pod}<button class:log-pod-selected={logTarget.pod === pod.name && logTarget.namespace === (pod.namespace || namespace)} on:click={() => selectLogPod(pod)}><span class="log-pod-dot"></span><div><strong>{pod.name}</strong><small>{pod.namespace || namespace}</small></div><span class="log-pod-arrow">→</span></button>{/each}</div>
               {#if logPorts.length}<section class="log-port-section"><div><span>Container ports</span><small>{logPorts.length}</small></div>{#each logPorts as port}<span class="log-port-chip" title={`${port.container}${port.name ? ` · ${port.name}` : ''} · ${port.protocol}`}><b>{port.port}/{port.protocol}</b><small>{port.container}{port.name ? ` · ${port.name}` : ''}</small></span>{/each}</section>{/if}
               {#if portForwardOpen}<section class="port-forward-form"><div><strong>Port forward</strong><button aria-label="Close port forward" on:click={() => (portForwardOpen = false)}>×</button></div><p>Expose {logTarget.pod} only on this Mac.</p><label>Remote port<input list="kuberniva-pod-ports" type="number" min="1" max="65535" bind:value={portForwardRemotePort} placeholder="e.g. 8080" /></label><datalist id="kuberniva-pod-ports">{#each suggestedForwardPorts as port}<option value={port}></option>{/each}</datalist><label>Local port<input type="number" min="1" max="65535" bind:value={portForwardLocalPort} placeholder="e.g. 8080" /></label><button class="primary" disabled={portForwarding} on:click={startPortForward}>{portForwarding ? 'Starting…' : 'Start forward'}</button></section>{/if}
-              {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Active forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>Local → {forward.remotePort}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward.id)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
+              {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Saved forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class:port-forward-paused-dot={forward.active === false} class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>{forward.active === false ? 'Saved · resumes on reconnect' : `Local → ${forward.remotePort}`}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
               <div class="log-pod-sidebar-footer">Switch Pods without leaving the log stream. Port forwards remain active until you stop them or quit Kuberniva.</div>
             </aside>
             <div class="log-stream-panel">
               <div class="log-stream-heading"><div><p class="eyebrow">Streaming output</p><h2>{logTarget.pod}</h2><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="table-actions"><button class="secondary" on:click={() => { closeLogs(); void navigateTo('Workloads') }}>← Back to workloads</button></div></div>
-              <div class="log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first live stream…' : loadingLogs ? 'Refreshing…' : 'Refreshes every 30 seconds · scroll up to hold your place'}</small></div>{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}</div>
-              {#if loadingLogs && logLines.length === 0}<div class="log-opening-state"><span><RefreshCw size={22} class="animate-spin" /></span><div><p class="eyebrow">Opening logs</p><h3>{logTarget.pod}</h3><p>Connecting to the Pod and preparing the first live output. You can switch Pods from the left after it opens.</p></div></div>{:else}<pre class="live-log-output" bind:this={logViewport}>{#if logLines.length}{logLines.join('\n')}{:else}The Pod returned no log lines for this container yet.{/if}</pre>{/if}
+              <div class="log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first live stream…' : loadingLogs ? 'Refreshing now…' : 'Auto-refreshes every 30 seconds · select, copy, or download'}</small></div><div class="log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class="log-tool-button" disabled={loadingLogs || !logTarget} on:click={() => loadLogs(true)}><RefreshCw size={13} class={loadingLogs ? 'animate-spin' : ''} /><span>{loadingLogs ? 'Refreshing' : 'Refresh'}</span></button><button class:log-tool-button-copied={logsCopied} class="log-tool-button" disabled={!logLines.length} on:click={copyLogs}>{#if logsCopied}<Check size={13} />{:else}<Copy size={13} />{/if}<span>{logsCopied ? 'Copied' : 'Copy'}</span></button><button class="log-tool-button" disabled={!logLines.length || downloadingLogs} on:click={downloadLogs}><Download size={13} /><span>{downloadingLogs ? 'Saving' : 'Download'}</span></button></div></div>
+              {#if loadingLogs && logLines.length === 0}<div class="log-opening-state"><span><RefreshCw size={22} class="animate-spin" /></span><div><p class="eyebrow">Opening logs</p><h3>{logTarget.pod}</h3><p>Connecting to the Pod and preparing the first live output. You can switch Pods from the left after it opens.</p></div></div>{:else}<pre class="live-log-output" bind:this={logViewport} aria-label={`${logTarget.pod} logs`}>{#if logLines.length}{logLines.join('\n')}{:else}The Pod returned no log lines for this container yet.{/if}</pre>{/if}
             </div>
           </section>
         {:else}

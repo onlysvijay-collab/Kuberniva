@@ -4924,6 +4924,130 @@ main.theme-dark .resource-object-heading > b { color: #edf2f6 !important; backgr
 main.theme-dark .count { color: #e7edf2 !important; background: #2d3946 !important; }
 main.theme-dark .nav-item.active .count { color: #15181c !important; background: #eceeed !important; }
 
+/* Log controls stay explicit without competing with the stream itself. */
+.log-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.log-tool-button {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid #d7e0e7;
+  border-radius: 7px;
+  color: #536476;
+  background: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.log-tool-button:hover:not(:disabled) { color: #263647; border-color: #aab8c4; background: #f7fafb; }
+.log-tool-button:disabled { opacity: .48; cursor: not-allowed; }
+.log-tool-button-copied { color: #267866; border-color: #a7d8cc; background: #edf9f6; }
+.port-forward-listening-dot.port-forward-paused-dot { background: #d4a348; box-shadow: 0 0 0 3px rgba(212,163,72,.14); }
+.port-forward-table-row-paused { background: #fffaf0; }
+.port-forward-table-row-paused .port-forward-status strong { color: #936c2d; }
+.workload-log-output,
+.live-log-output {
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.workload-log-output::selection,
+.live-log-output::selection { color: #071015; background: #82ddd2; }
+
+/* Final dark-theme contrast pass: controls, transient surfaces, and dense
+   operational data use the same graphite scale as the main workbench. */
+main.theme-dark { color-scheme: dark; }
+main.theme-dark * { scrollbar-color: #526173 transparent; }
+main.theme-dark *::-webkit-scrollbar-thumb { border-color: transparent; background: #526173; background-clip: padding-box; }
+main.theme-dark *::-webkit-scrollbar-thumb:hover { background: #6c7c8f; background-clip: padding-box; }
+main.theme-dark input::placeholder,
+main.theme-dark textarea::placeholder { color: #7f8d9c !important; opacity: 1; }
+main.theme-dark select option { color: #e9eef3; background: #1b232d; }
+main.theme-dark button:focus-visible,
+main.theme-dark input:focus-visible,
+main.theme-dark select:focus-visible,
+main.theme-dark textarea:focus-visible { outline: 2px solid #8e85f3; outline-offset: 2px; }
+main.theme-dark .toast {
+  color: #d9f2ea;
+  border-color: #355b53;
+  background: #172923;
+  box-shadow: 0 18px 40px rgba(0,0,0,.48);
+}
+main.theme-dark .toast span { color: #0d1c18; background: #78d8bc; }
+main.theme-dark .settings-row,
+main.theme-dark .settings-theme-option,
+main.theme-dark .port-forward-table-row,
+main.theme-dark .port-forward-summary,
+main.theme-dark .port-forward-form,
+main.theme-dark .log-active-forwards,
+main.theme-dark .log-active-forward {
+  color: #cbd5df;
+  border-color: #34414f;
+  background: #1b232d;
+}
+main.theme-dark .settings-row strong,
+main.theme-dark .port-forward-endpoint strong,
+main.theme-dark .port-forward-context strong,
+main.theme-dark .log-active-forward strong { color: #edf2f6; }
+main.theme-dark .settings-row small,
+main.theme-dark .port-forward-endpoint small,
+main.theme-dark .port-forward-context small,
+main.theme-dark .log-active-forward small { color: #99a6b4; }
+main.theme-dark .port-forward-table-header { color: #aab6c3; border-color: #34414f; background: #202832; }
+main.theme-dark .port-forward-table-row-paused { background: #242118; }
+main.theme-dark .port-forward-table-row-paused .port-forward-status strong { color: #e1c183; }
+main.theme-dark .port-forward-stop { color: #ffb0bb; border-color: #69424b; background: #321f25; }
+main.theme-dark .port-forward-stop:hover:not(:disabled) { color: #15181c; border-color: #fff; background: #fff; }
+main.theme-dark .port-forward-form input,
+main.theme-dark .terminal-target select,
+main.theme-dark .terminal-command input,
+main.theme-dark .kubeconfig-modal input,
+main.theme-dark .kubeconfig-modal textarea,
+main.theme-dark .deletion-name-input input {
+  color: #edf2f6;
+  border-color: #435160;
+  background: #121820;
+}
+main.theme-dark .port-forward-form label,
+main.theme-dark .deletion-name-input,
+main.theme-dark .kubeconfig-modal label { color: #a9b5c1; }
+main.theme-dark .deletion-target-summary { border-color: #3a4654; background: #202832; }
+main.theme-dark .deletion-target-summary dt { color: #96a3b1; }
+main.theme-dark .deletion-target-summary dd { color: #e2e8ee; }
+main.theme-dark .deletion-warning { color: #e8ca91; border-color: #64512e; background: #30291d; }
+main.theme-dark .workload-log-pod-picker { color: #c8d2dc; border-color: #2f3b48; background: #171e27; }
+main.theme-dark .workload-log-pod-picker strong { color: #edf2f6; }
+main.theme-dark .workload-log-pod-picker small,
+main.theme-dark .workload-log-pod-picker label { color: #9ba8b6; }
+main.theme-dark .workload-log-pod-picker select { color: #edf2f6; border-color: #435160; background: #202832; }
+main.theme-dark .workload-log-ports { background: #151c24; }
+main.theme-dark .workload-log-ports > strong { color: #9eabb8; }
+main.theme-dark .workload-log-ports span { color: #9be0d7; border-color: #355c5b; background: #193033; }
+main.theme-dark .workload-log-ports span small { color: #86b9b3; }
+main.theme-dark .port-forward-button,
+main.theme-dark .log-tool-button {
+  color: #cbd5df;
+  border-color: #435160;
+  background: #202832;
+}
+main.theme-dark .port-forward-button:hover,
+main.theme-dark .port-forward-button.port-forward-open,
+main.theme-dark .log-tool-button:hover:not(:disabled) { color: #15181c; border-color: #fff; background: #fff; }
+main.theme-dark .log-tool-button-copied { color: #a3e3d9; border-color: #396b67; background: #193033; }
+main.theme-dark .log-tool-button-copied:hover:not(:disabled) { color: #15181c; background: #fff; }
+main.theme-dark .workload-log-output::selection,
+main.theme-dark .live-log-output::selection,
+main.theme-dark .terminal-output::selection,
+main.theme-dark .cli-output::selection { color: #071015; background: #82ddd2; }
+
+@media (max-width: 760px) {
+  .log-toolbar { align-items: stretch; flex-direction: column; gap: 9px; }
+  .log-toolbar-actions { justify-content: flex-start; flex-wrap: wrap; }
+  .workload-log-toolbar-actions { flex-wrap: wrap; }
+}
+
 @container workload-page (max-width: 930px) {
   .workload-grid.workload-detail-open,
   .workload-grid.workload-logs-open { grid-template-columns: minmax(0, 1fr); }
@@ -4939,4 +5063,227 @@ main.theme-dark .nav-item.active .count { color: #15181c !important; background:
   .resource-focus-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
   .resource-workbench-body-focused { grid-template-columns: minmax(0, 1fr); overflow: auto; }
   .resource-workbench-body-focused .resource-object-browser { min-height: 260px; border-right: 0; border-bottom: 1px solid var(--ui-border); }
+}
+
+/* Compact overview: navigation remains immediately available, while the Node
+   workbench receives the vertical space operators actually need. */
+.cluster-overview-dashboard {
+  grid-template-columns: minmax(0, 1fr) minmax(350px, .52fr);
+  grid-template-rows: 92px minmax(0, 1fr);
+  gap: 10px;
+  overflow: hidden;
+}
+.cluster-overview-dashboard .cluster-hero {
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 13px;
+}
+.cluster-overview-dashboard .cluster-hero::before { width: 250px; height: 250px; right: -92px; bottom: -190px; }
+.cluster-overview-dashboard .cluster-hero-mark { width: 42px; height: 42px; flex: 0 0 auto; border-radius: 12px; }
+.cluster-overview-dashboard .cluster-hero .brand-mark { width: 29px; height: 29px; }
+.cluster-overview-dashboard .cluster-hero .eyebrow { margin-bottom: 3px; font-size: 9px; }
+.cluster-overview-dashboard .cluster-hero h2 { font-size: 19px; letter-spacing: -.45px; }
+.cluster-overview-dashboard .cluster-hero-copy > p:last-child {
+  max-width: 510px;
+  margin-top: 4px;
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cluster-overview-dashboard .overview-summary { margin-left: auto; }
+.cluster-overview-dashboard .overview-summary > div { min-width: 62px; padding: 2px 9px; }
+.cluster-overview-dashboard .overview-summary strong { font-size: 14px; }
+.cluster-overview-dashboard .overview-summary span { font-size: 9px; }
+.cluster-overview-dashboard .overview-quick-actions {
+  grid-column: 2;
+  grid-row: 1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+  overflow: visible;
+}
+.cluster-overview-dashboard .overview-quick-actions button,
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions button {
+  min-height: 0;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+}
+.cluster-overview-dashboard .overview-quick-actions button > span,
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions button > span {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 14px;
+}
+.cluster-overview-dashboard .overview-quick-actions div { gap: 2px; }
+.cluster-overview-dashboard .overview-quick-actions em { font-size: 9px; }
+.cluster-overview-dashboard .overview-quick-actions strong,
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions strong { font-size: 12px; }
+.cluster-overview-dashboard .overview-quick-actions small,
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions small {
+  max-width: 175px;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cluster-overview-dashboard .overview-quick-actions b,
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions b { font-size: 14px; }
+.cluster-overview-dashboard .node-overview { grid-column: 1 / -1; grid-row: 2; }
+.cluster-overview-dashboard .node-overview .panel-heading { min-height: 54px; padding: 9px 14px 8px; }
+.cluster-overview-dashboard .node-overview .panel-heading .eyebrow { margin-bottom: 2px; }
+.cluster-overview-dashboard .node-overview .panel-heading h2 { font-size: 16px; }
+.cluster-overview-dashboard .node-overview .panel-heading p { margin-top: 2px; font-size: 9px; }
+.cluster-overview-dashboard .overview-actions small { font-size: 9px; }
+.cluster-overview-dashboard .cluster-capacity-overview { margin: 0 12px 9px; padding: 8px; border-radius: 10px; }
+.cluster-overview-dashboard .cluster-capacity-heading { margin-bottom: 6px; }
+.cluster-overview-dashboard .cluster-capacity-heading strong { font-size: 10px; }
+.cluster-overview-dashboard .cluster-capacity-heading small { font-size: 9px; }
+.cluster-overview-dashboard .cluster-capacity-heading > span { padding: 3px 6px; font-size: 9px; }
+.cluster-overview-dashboard .cluster-capacity-grid { gap: 7px; }
+.cluster-overview-dashboard .cluster-capacity-card { gap: 4px; padding: 7px 8px; border-radius: 8px; }
+.cluster-overview-dashboard .cluster-capacity-card-heading span { font-size: 9px; }
+.cluster-overview-dashboard .cluster-capacity-card-heading strong { font-size: 12px; }
+.cluster-overview-dashboard .cluster-capacity-card-heading b,
+.cluster-overview-dashboard .cluster-capacity-card small { font-size: 9px; }
+.cluster-overview-dashboard .cluster-capacity-card .usage-meter { height: 5px; }
+.cluster-overview-dashboard .node-workbench { grid-template-columns: minmax(205px, .24fr) minmax(0, 1fr); }
+.cluster-overview-dashboard .node-list { padding: 6px; }
+.cluster-overview-dashboard .node-list button,
+main.theme-dark .cluster-overview-dashboard .node-list button { min-height: 48px; padding: 6px; }
+.cluster-overview-dashboard .node-list-mark { width: 25px; height: 25px; }
+.cluster-overview-dashboard .node-list strong { font-size: 10px; }
+.cluster-overview-dashboard .node-list small { font-size: 9px; }
+.cluster-overview-dashboard .node-inspector,
+main.theme-dark .cluster-overview-dashboard .node-inspector { padding: 11px 13px 14px; scrollbar-gutter: stable; }
+.cluster-overview-dashboard .node-inspector-heading h3,
+main.theme-dark .cluster-overview-dashboard .node-inspector-heading h3 { font-size: 15px; }
+.cluster-overview-dashboard .node-inspector-heading p:last-child,
+main.theme-dark .cluster-overview-dashboard .node-inspector-heading p:last-child { margin-top: 3px; font-size: 9.5px; }
+.cluster-overview-dashboard .node-inspector-status { padding: 4px 7px; font-size: 9px; }
+.cluster-overview-dashboard .node-detail-grid { gap: 6px; margin-top: 8px; }
+.cluster-overview-dashboard .node-detail-grid > div { gap: 3px; padding: 6px 7px; }
+.cluster-overview-dashboard .node-detail-grid span { font-size: 9px; }
+.cluster-overview-dashboard .node-detail-grid strong { font-size: 9.5px; }
+.cluster-overview-dashboard .node-metrics-grid { gap: 7px; margin-top: 7px; }
+.cluster-overview-dashboard .node-metric-card { gap: 4px; padding: 7px 8px; border-radius: 8px; }
+.cluster-overview-dashboard .node-metric-heading span { font-size: 9px; }
+.cluster-overview-dashboard .node-metric-heading strong { font-size: 11px; }
+.cluster-overview-dashboard .node-metric-heading b,
+.cluster-overview-dashboard .node-metric-card small { font-size: 9px; }
+.cluster-overview-dashboard .node-metric-card .usage-meter { height: 5px; }
+.cluster-overview-dashboard .node-detail-columns { gap: 7px; margin-top: 7px; }
+.cluster-overview-dashboard .node-detail-section { padding: 7px 8px; border-radius: 8px; }
+.cluster-overview-dashboard .node-detail-section-heading { margin-bottom: 5px; }
+.cluster-overview-dashboard .node-detail-section-heading strong { font-size: 9px; }
+.cluster-overview-dashboard .node-property-list,
+.cluster-overview-dashboard .node-condition-list { gap: 4px; }
+.cluster-overview-dashboard .node-property-list > div { gap: 6px; padding-bottom: 3px; }
+.cluster-overview-dashboard .node-property-list span,
+.cluster-overview-dashboard .node-property-list strong,
+.cluster-overview-dashboard .node-property-list small,
+.cluster-overview-dashboard .node-condition-list strong,
+.cluster-overview-dashboard .node-condition-list small { font-size: 9px; }
+.cluster-overview-dashboard .node-metadata { margin-top: 7px; }
+.cluster-overview-dashboard .node-metadata summary { padding: 7px 8px; font-size: 9px; }
+.cluster-overview-dashboard .cluster-capacity-overview {
+  display: grid;
+  grid-template-columns: minmax(180px, .24fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+}
+.cluster-overview-dashboard .cluster-capacity-heading {
+  align-items: flex-start;
+  justify-content: center;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding-right: 8px;
+  border-right: 1px solid var(--ui-border);
+}
+.cluster-overview-dashboard .cluster-capacity-heading > span { margin-top: 2px; }
+.cluster-overview-dashboard .cluster-capacity-grid { align-items: stretch; }
+.cluster-overview-dashboard .node-inspector {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.node-detail-tabs {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 7px;
+  padding: 3px;
+  overflow-x: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface-muted);
+  scrollbar-width: none;
+}
+.node-detail-tabs::-webkit-scrollbar { display: none; }
+.node-detail-tabs button {
+  min-height: 23px;
+  flex: 1 0 auto;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ui-muted);
+  background: transparent;
+  font-size: 9px;
+  font-weight: 700;
+}
+.node-detail-tabs button:hover { color: var(--ui-ink); background: #ececea; }
+.node-detail-tabs button.node-detail-tab-active {
+  color: #15181c;
+  border-color: var(--ui-selected-border);
+  background: #fff;
+  box-shadow: 0 3px 9px rgba(24,26,32,.11);
+  font-weight: 850;
+}
+.node-detail-tab-panel { min-height: 0; flex: 1; overflow: auto; padding-top: 7px; scrollbar-gutter: stable; }
+.node-detail-tab-panel .node-detail-grid,
+.node-detail-tab-panel .node-metrics-grid,
+.node-detail-tab-panel .node-detail-columns { margin-top: 0; }
+.node-detail-tab-panel .node-metrics-grid { margin-top: 7px; }
+.node-detail-section-expanded { min-height: 100%; }
+.node-health-grid { height: 100%; }
+.node-metadata-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.node-metadata-panel > section { min-width: 0; padding: 8px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-surface-muted); }
+.node-metadata-panel .node-metadata-grid { padding: 0; }
+main.theme-dark .node-detail-tabs { border-color: #35414f; background: #202832; }
+main.theme-dark .node-detail-tabs button { color: #aeb9c5; }
+main.theme-dark .node-detail-tabs button:hover { color: #fff; background: #29343f; }
+main.theme-dark .node-detail-tabs button.node-detail-tab-active { color: #15181c; border-color: #fff; background: #fff; box-shadow: var(--ui-selected-shadow); }
+main.theme-dark .node-metadata-panel > section { border-color: #35414f; background: #202832; }
+
+@media (max-width: 1280px) {
+  .cluster-overview-dashboard {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 82px 66px minmax(0, 1fr);
+  }
+  .cluster-overview-dashboard .cluster-hero { grid-column: 1; grid-row: 1; padding-block: 9px; }
+  .cluster-overview-dashboard .overview-quick-actions { grid-column: 1; grid-row: 2; }
+  .cluster-overview-dashboard .node-overview { grid-column: 1; grid-row: 3; }
+  .cluster-overview-dashboard .overview-quick-actions button,
+  main.theme-dark .cluster-overview-dashboard .overview-quick-actions button { padding: 7px 10px; }
+}
+
+@media (max-width: 760px) {
+  .cluster-overview-dashboard { grid-template-rows: auto auto minmax(0, 1fr); overflow: auto; }
+  .cluster-overview-dashboard .cluster-hero { flex-wrap: wrap; }
+  .cluster-overview-dashboard .overview-summary { width: 100%; margin-left: 0; }
+  .cluster-overview-dashboard .node-workbench { grid-template-columns: 1fr; grid-template-rows: 110px minmax(0, 1fr); }
+  .cluster-overview-dashboard .node-list { display: flex; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--ui-border); }
+  .cluster-overview-dashboard .node-list button { min-width: 180px; }
+  .cluster-overview-dashboard .cluster-capacity-overview { grid-template-columns: 1fr; }
+  .cluster-overview-dashboard .cluster-capacity-heading { padding-right: 0; padding-bottom: 6px; border-right: 0; border-bottom: 1px solid var(--ui-border); }
+  .node-metadata-panel { grid-template-columns: 1fr; }
 }

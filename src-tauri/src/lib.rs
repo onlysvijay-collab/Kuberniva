@@ -44,6 +44,7 @@ static KUBECONFIG_IMPORT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static NEXT_PORT_FORWARD_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RESOURCE_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_PASTED_KUBECONFIG_BYTES: usize = 5 * 1024 * 1024;
+const MAX_LOG_EXPORT_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -287,8 +288,16 @@ struct KubeCliResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SaveLogFileRequest {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartPortForwardRequest {
     kubeconfig_path: Option<String>,
+    cluster_id: Option<String>,
     context: Option<String>,
     namespace: String,
     pod: String,
@@ -306,6 +315,7 @@ struct StopPortForwardRequest {
 #[serde(rename_all = "camelCase")]
 struct PortForwardInfo {
     id: String,
+    cluster_id: Option<String>,
     context: Option<String>,
     local_address: String,
     local_port: u16,
@@ -2445,6 +2455,34 @@ async fn read_pod_logs(request: PodLogRequest) -> Result<PodLogResponse, String>
     })
 }
 
+fn write_log_snapshot(path: &Path, content: &str) -> Result<(), String> {
+    if content.len() > MAX_LOG_EXPORT_BYTES {
+        return Err("Log exports are limited to 20 MiB".to_string());
+    }
+    if path.as_os_str().is_empty() || path.file_name().is_none() {
+        return Err("Choose a valid file name for the log export".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("Could not finish writing {}: {error}", path.display()))
+}
+
+#[tauri::command]
+async fn save_log_file(request: SaveLogFileRequest) -> Result<(), String> {
+    let path = PathBuf::from(request.path);
+    let content = request.content;
+    tokio::task::spawn_blocking(move || write_log_snapshot(&path, &content))
+        .await
+        .map_err(|error| format!("Could not finish the log export: {error}"))?
+}
+
 fn pod_runtime_info(pod: &Pod) -> PodRuntimeInfo {
     let containers = pod
         .spec
@@ -2632,6 +2670,42 @@ fn cli_tokens(command: &str) -> Result<Vec<String>, String> {
     shell_words::split(command).map_err(|error| format!("Could not parse the command: {error}"))
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn cluster_shell_command(command: &str, request: &KubeCliRequest) -> String {
+    let mut kubectl_flags = Vec::new();
+    let mut helm_flags = Vec::new();
+    if let Some(path) = request
+        .kubeconfig_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        let path = shell_quote(path.trim());
+        kubectl_flags.extend(["--kubeconfig".to_string(), path.clone()]);
+        helm_flags.extend(["--kubeconfig".to_string(), path]);
+    }
+    let context = shell_quote(request.context.trim());
+    kubectl_flags.extend(["--context".to_string(), context.clone()]);
+    helm_flags.extend(["--kube-context".to_string(), context]);
+    if let Some(namespace) = request
+        .namespace
+        .as_deref()
+        .filter(|namespace| !namespace.trim().is_empty())
+    {
+        let namespace = shell_quote(namespace.trim());
+        kubectl_flags.extend(["--namespace".to_string(), namespace.clone()]);
+        helm_flags.extend(["--namespace".to_string(), namespace]);
+    }
+    format!(
+        "kubectl() {{ command kubectl {} \"$@\"; }}\nhelm() {{ command helm {} \"$@\"; }}\n{}",
+        kubectl_flags.join(" "),
+        helm_flags.join(" "),
+        command
+    )
+}
+
 #[tauri::command]
 async fn run_cluster_command(request: KubeCliRequest) -> Result<KubeCliResponse, String> {
     let command = request.command.trim();
@@ -2670,13 +2744,10 @@ async fn run_cluster_command(request: KubeCliRequest) -> Result<KubeCliResponse,
     let tool_is_helm = command_is(&tool, "helm");
     let mut process;
     if request.shell {
-        // Shell mode is deliberately explicit for pipelines, redirects, and
-        // local helpers. The selected context remains available through
-        // KUBERNIVA_* variables; direct kubectl/helm mode below injects the
-        // corresponding flags so the common case is deterministic.
+        let shell_command = cluster_shell_command(command, &request);
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         process = TokioCommand::new(shell);
-        process.args(["-lc", command]);
+        process.args(["-lc", &shell_command]);
     } else {
         let mut args = tokens[1..].to_vec();
         if tool_is_kubectl || tool_is_helm {
@@ -2777,6 +2848,7 @@ async fn start_port_forward(request: StartPortForwardRequest) -> Result<PortForw
     );
     let info = PortForwardInfo {
         id: id.clone(),
+        cluster_id: request.cluster_id.clone(),
         context,
         local_address: format!("127.0.0.1:{local_port}"),
         local_port,
@@ -3300,6 +3372,58 @@ mod tests {
     }
 
     #[test]
+    fn shell_mode_wraps_kubectl_and_helm_with_the_active_workspace() {
+        let request = KubeCliRequest {
+            kubeconfig_path: Some("/Users/example/cluster config.yaml".to_string()),
+            context: "production-context".to_string(),
+            namespace: Some("payments".to_string()),
+            command: "kubectl get pods | grep Running && helm list".to_string(),
+            shell: true,
+        };
+
+        let script = cluster_shell_command(&request.command, &request);
+
+        assert!(script.contains("kubectl() { command kubectl --kubeconfig '/Users/example/cluster config.yaml' --context 'production-context' --namespace 'payments' \"$@\"; }"));
+        assert!(script.contains("helm() { command helm --kubeconfig '/Users/example/cluster config.yaml' --kube-context 'production-context' --namespace 'payments' \"$@\"; }"));
+        assert!(script.ends_with("kubectl get pods | grep Running && helm list"));
+    }
+
+    #[test]
+    fn shell_mode_omits_namespace_when_all_namespaces_is_selected() {
+        let request = KubeCliRequest {
+            kubeconfig_path: None,
+            context: "development".to_string(),
+            namespace: None,
+            command: "kubectl get pods --all-namespaces".to_string(),
+            shell: true,
+        };
+
+        let script = cluster_shell_command(&request.command, &request);
+
+        assert!(!script.contains("--namespace"));
+        assert!(script.contains("--context 'development'"));
+        assert!(script.contains("--kube-context 'development'"));
+    }
+
+    #[test]
+    fn writes_the_visible_log_snapshot_exactly() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after the epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("kuberniva-log-{suffix}.log"));
+        let content = "2026-08-12T20:30:00Z first line\n2026-08-12T20:30:01Z second line\n";
+
+        write_log_snapshot(&path, content).expect("write log snapshot");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read log snapshot"),
+            content
+        );
+        fs::remove_file(path).expect("remove log snapshot");
+    }
+
+    #[test]
     fn reports_a_missing_oidc_exec_helper_with_an_actionable_hint() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3330,6 +3454,7 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             import_pasted_kubeconfig,
@@ -3347,6 +3472,7 @@ pub fn run() {
             save_resource_yaml,
             list_workload_pods,
             read_pod_logs,
+            save_log_file,
             get_pod_runtime,
             exec_pod_command,
             run_cluster_command,
