@@ -1430,7 +1430,6 @@
     selectedCategory = category;
     sidebarResourceCategory = category;
     resourceSearch = '';
-    closeSidebarTypeMenus();
     clusterPickerOpen = false;
     selectedResource = null;
     resourceObjects = [];
@@ -1774,13 +1773,12 @@
   }
 
   async function navigateTo(view: View) {
-    // Views are self-contained workspaces. Never leave an inspector, YAML tab,
-    // stream, or flyout visually attached when the user changes context.
+    // Detail workflows belong to their view, while the independent API
+    // navigator stays open until the user explicitly closes it.
     cancelPendingLiveRefresh();
     clearResourceObjectSelection();
     clusterPickerOpen = false;
     namespaceOpen = false;
-    closeSidebarTypeMenus();
     commandOpen = false;
     commandQuery = '';
     if (view !== 'Logs') closeLogs();
@@ -1938,9 +1936,15 @@
     if (restoreFocus) void tick().then(() => document.getElementById(sidebarTypeTriggerId(restoreFocus))?.focus());
   }
 
+  function closeSidebarTypeMenu(menu: SidebarTypeMenu, restoreFocus = false) {
+    if (menu === 'workload') sidebarWorkloadMenuOpen = false;
+    else sidebarResourceMenuOpen = false;
+    if (restoreFocus) void tick().then(() => document.getElementById(sidebarTypeTriggerId(menu))?.focus());
+  }
+
   async function openSidebarTypeMenu(menu: SidebarTypeMenu, focusLast = false) {
-    sidebarWorkloadMenuOpen = menu === 'workload';
-    sidebarResourceMenuOpen = menu === 'resource';
+    if (menu === 'workload') sidebarWorkloadMenuOpen = true;
+    else sidebarResourceMenuOpen = true;
     await tick();
     const options = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${sidebarTypeMenuId(menu)} [role="option"]`));
     if (!options.length) return;
@@ -1952,17 +1956,16 @@
     const isOpen = menu === 'workload' ? sidebarWorkloadMenuOpen : sidebarResourceMenuOpen;
     const targetView: View = menu === 'workload' ? 'Workloads' : 'Resources';
     if (activeView === targetView) {
-      sidebarWorkloadMenuOpen = menu === 'workload' ? !isOpen : false;
-      sidebarResourceMenuOpen = menu === 'resource' ? !isOpen : false;
+      if (menu === 'workload') sidebarWorkloadMenuOpen = !isOpen;
+      else sidebarResourceMenuOpen = !isOpen;
       return;
     }
     void navigateTo(targetView).then(() => {
-      sidebarWorkloadMenuOpen = menu === 'workload';
-      sidebarResourceMenuOpen = menu === 'resource';
+      if (menu === 'workload') sidebarWorkloadMenuOpen = true;
+      else sidebarResourceMenuOpen = true;
     });
-    sidebarWorkloadMenuOpen = menu === 'workload';
-    sidebarResourceMenuOpen = menu === 'resource';
-    sidebarResourceSearch = '';
+    if (menu === 'workload') sidebarWorkloadMenuOpen = true;
+    else sidebarResourceMenuOpen = true;
   }
 
   function handleSidebarTypeTriggerKeydown(event: KeyboardEvent, menu: SidebarTypeMenu) {
@@ -1975,7 +1978,7 @@
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      closeSidebarTypeMenus(menu);
+      closeSidebarTypeMenu(menu, true);
       return;
     }
     const options = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${sidebarTypeMenuId(menu)} [role="option"]`));
@@ -3407,7 +3410,6 @@
     closeYamlEditor();
     clusterPickerOpen = false;
     namespaceOpen = false;
-    closeSidebarTypeMenus();
     activeClusterId = cluster.id;
     activeCluster = cluster.name;
     activeKubeconfigPath = cluster.kubeconfigPath;
@@ -3869,7 +3871,7 @@
   <meta name="description" content="A calm, fast Kubernetes control surface." />
 </svelte:head>
 
-<main class:sidebar-collapsed={sidebarHidden} class:theme-dark={theme === 'dark'}>
+<main class:sidebar-collapsed={sidebarHidden} class:theme-dark={theme === 'dark'} style:--sidebar-width={`${sidebarHidden ? 0 : sidebarWidth}px`}>
   <aside class:sidebar-hidden={sidebarHidden} class:sidebar-flyout-open={sidebarWorkloadMenuOpen || sidebarResourceMenuOpen} class="sidebar" style:width={`${sidebarWidth}px`} style:flex-basis={`${sidebarWidth}px`}>
     <div class="brand">
       <img class="brand-mark" src="/kuberniva-mark.png" alt="" />
@@ -3882,29 +3884,10 @@
         {#if view === 'Workloads'}
           <div class:sidebar-type-open={sidebarWorkloadMenuOpen} class="sidebar-type-nav sidebar-workload-menu">
             <button id="sidebar-workload-type-trigger" class:active={activeView === 'Workloads'} class="nav-item sidebar-accordion-trigger" type="button" aria-expanded={sidebarWorkloadMenuOpen} aria-controls="sidebar-workload-type-options" on:click={() => activateSidebarTypeSection('workload')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'workload')}><span class="nav-icon"><Workflow size={17} strokeWidth={1.8} /></span><span class="sidebar-nav-label">Workloads</span>{#if workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}<ChevronDown class="sidebar-accordion-chevron" size={14} /></button>
-            {#if sidebarWorkloadMenuOpen}
-              <div class="sidebar-inline-subnav">
-                <div id="sidebar-workload-type-options" class="sidebar-type-options sidebar-inline-options" role="listbox" tabindex="0" aria-label="Workload types" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'workload')}>
-                  {#if workloadResources.length}
-                    {#each workloadResources as resource}<button type="button" role="option" aria-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} class:sidebar-type-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} on:click={() => selectSidebarWorkloadType(resource)}><span class="sidebar-type-icon"><Boxes size={13} /></span><span><strong>{resource.kind}</strong><small>{resource.apiVersion}</small></span><b>{workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}
-                  {:else}<div class="sidebar-type-empty"><strong>No workload APIs discovered</strong><small>Select or refresh a cluster first.</small></div>{/if}
-                </div>
-              </div>
-            {/if}
           </div>
         {:else if view === 'Resources'}
           <div class:sidebar-type-open={sidebarResourceMenuOpen} class="sidebar-type-nav sidebar-resource-menu">
             <button id="sidebar-resource-type-trigger" class:active={activeView === 'Resources'} class="nav-item sidebar-accordion-trigger" type="button" aria-expanded={sidebarResourceMenuOpen} aria-controls="sidebar-resource-type-options" on:click={() => activateSidebarTypeSection('resource')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'resource')}><span class="nav-icon"><Database size={17} strokeWidth={1.8} /></span><span class="sidebar-nav-label">Resources</span><span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span><ChevronDown class="sidebar-accordion-chevron" size={14} /></button>
-            {#if sidebarResourceMenuOpen}
-              <div class="sidebar-inline-subnav sidebar-inline-resource">
-                <div class="sidebar-inline-tools"><select bind:value={sidebarResourceCategory} aria-label="Filter resource category"><option value="All resources">All APIs</option>{#each resourceCategories as category}<option value={category}>{category === 'Custom Resources' ? 'Custom APIs' : category}</option>{/each}</select><label><Search size={13} /><input bind:value={sidebarResourceSearch} placeholder="Filter APIs" aria-label="Filter API resources" /></label></div>
-                <div id="sidebar-resource-type-options" class="sidebar-type-options sidebar-inline-options" role="listbox" tabindex="0" aria-label="API resource types" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'resource')}>
-                  {#if sidebarVisibleResources.length}
-                    {#each sidebarVisibleResources as resource}<button type="button" role="option" aria-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} class:sidebar-type-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} on:click={() => selectSidebarResourceType(resource)}><span class:custom={resource.crd} class="sidebar-type-icon">{resource.crd ? '◇' : '○'}</span><span><strong>{resource.kind}</strong><small>{resource.apiVersion}</small></span><b>{selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}
-                  {:else}<div class="sidebar-type-empty"><strong>No matching APIs</strong><small>Change the category or filter.</small></div>{/if}
-                </div>
-              </div>
-            {/if}
           </div>
         {:else}
           <button class:active={activeView === view} class="nav-item" on:click={() => navigateTo(view as View)}><span class="nav-icon">{#if view === 'Overview'}<LayoutDashboard size={17} strokeWidth={1.8} />{:else if view === 'Events'}<ScrollText size={17} strokeWidth={1.8} />{:else if view === 'CLI'}<Terminal size={17} strokeWidth={1.8} />{:else}<Cable size={17} strokeWidth={1.8} />{/if}</span>{view}{#if view === 'Events' && namespaceClusterEvents.length}<span class="count">{namespaceClusterEvents.length}</span>{/if}{#if view === 'Port forwards'}<span class:port-forward-count-active={activeClusterPortForwards.length > 0} class="count">{activeClusterPortForwards.length}</span>{/if}</button>
@@ -3954,6 +3937,44 @@
     </div>
   </aside>
   <div class:sidebar-hidden={sidebarHidden} class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" on:pointerdown={startSidebarResize}></div>
+
+  {#if !sidebarHidden && (sidebarWorkloadMenuOpen || sidebarResourceMenuOpen)}
+    <aside class:workspace-type-rail-split={sidebarWorkloadMenuOpen && sidebarResourceMenuOpen} class="workspace-type-rail" aria-label="Kubernetes resource navigator">
+      <header class="workspace-type-rail-heading">
+        <div><span>Navigator</span><strong>Cluster APIs</strong></div>
+        <button type="button" aria-label="Close resource navigator" title="Close resource navigator" on:click={() => closeSidebarTypeMenus()}>×</button>
+      </header>
+
+      {#if sidebarWorkloadMenuOpen}
+        <section class="workspace-type-section workspace-workload-section" aria-labelledby="workspace-workload-heading">
+          <header>
+            <div><span class="workspace-type-mark"><Workflow size={15} strokeWidth={1.9} /></span><span><strong id="workspace-workload-heading">Workloads</strong><small>{workloadResources.length} API types</small></span></div>
+            <button type="button" aria-label="Close workload types" title="Close workload types" on:click={() => closeSidebarTypeMenu('workload', true)}>×</button>
+          </header>
+          <div id="sidebar-workload-type-options" class="sidebar-type-options workspace-type-options" role="listbox" tabindex="0" aria-label="Workload types" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'workload')}>
+            {#if workloadResources.length}
+              {#each workloadResources as resource}<button type="button" role="option" aria-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} class:sidebar-type-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} on:click={() => selectSidebarWorkloadType(resource)}><span class="sidebar-type-icon"><Boxes size={14} /></span><span><strong>{resource.kind}</strong><small>{resource.apiVersion} · {resource.namespaced ? 'Namespaced' : 'Cluster-wide'}</small></span><b>{workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}
+            {:else}<div class="sidebar-type-empty"><strong>No workload APIs discovered</strong><small>Select or refresh a cluster first.</small></div>{/if}
+          </div>
+        </section>
+      {/if}
+
+      {#if sidebarResourceMenuOpen}
+        <section class="workspace-type-section workspace-resource-section" aria-labelledby="workspace-resource-heading">
+          <header>
+            <div><span class="workspace-type-mark"><Database size={15} strokeWidth={1.9} /></span><span><strong id="workspace-resource-heading">Resources</strong><small>{resourceWorkspaceResources.length} API types</small></span></div>
+            <button type="button" aria-label="Close resource types" title="Close resource types" on:click={() => closeSidebarTypeMenu('resource', true)}>×</button>
+          </header>
+          <div class="workspace-resource-tools"><select bind:value={sidebarResourceCategory} aria-label="Filter resource category"><option value="All resources">All APIs</option>{#each resourceCategories as category}<option value={category}>{category === 'Custom Resources' ? 'Custom APIs' : category}</option>{/each}</select><label><Search size={14} /><input bind:value={sidebarResourceSearch} placeholder="Filter kind, group, or version" aria-label="Filter API resources" /></label></div>
+          <div id="sidebar-resource-type-options" class="sidebar-type-options workspace-type-options" role="listbox" tabindex="0" aria-label="API resource types" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'resource')}>
+            {#if sidebarVisibleResources.length}
+              {#each sidebarVisibleResources as resource}<button type="button" role="option" aria-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} class:sidebar-type-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} on:click={() => selectSidebarResourceType(resource)}><span class:custom={resource.crd} class="sidebar-type-icon">{resource.crd ? '◇' : '○'}</span><span><strong>{resource.kind}</strong><small>{resource.apiVersion} · {resource.namespaced ? 'Namespaced' : 'Cluster-wide'}</small></span><b>{selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}
+            {:else}<div class="sidebar-type-empty"><strong>No matching APIs</strong><small>Change the category or search term.</small></div>{/if}
+          </div>
+        </section>
+      {/if}
+    </aside>
+  {/if}
 
   <section class="app-shell">
     <header class="topbar">

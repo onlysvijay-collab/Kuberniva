@@ -5178,6 +5178,27 @@ main.theme-dark .cluster-overview-dashboard .overview-quick-actions small {
 }
 .cluster-overview-dashboard .overview-quick-actions b,
 main.theme-dark .cluster-overview-dashboard .overview-quick-actions b { font-size: 14px; }
+
+/* Final selected-object contrast guard: object names and actions must stay
+   readable after every dark-theme surface override above. */
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected,
+main.theme-dark .workload-selection-row > .workload-object-row.workload-object-selected {
+  color: #fff !important;
+  border-color: #6a8793 !important;
+  background: linear-gradient(90deg, #344a57, #263943) !important;
+  box-shadow: inset 4px 0 #8be0d6, 0 6px 15px rgba(0, 0, 0, .28) !important;
+}
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-primary strong,
+main.theme-dark .workload-selection-row > .workload-object-row.workload-object-selected .workload-object-name strong {
+  color: #fff !important;
+  font-weight: 900 !important;
+}
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-namespace,
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-age,
+main.theme-dark .workload-selection-row > .workload-object-row.workload-object-selected .workload-object-name small,
+main.theme-dark .workload-selection-row > .workload-object-row.workload-object-selected .workload-row-fact b small { color: #d5dfe6 !important; }
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-action,
+main.theme-dark .workload-selection-row > .workload-object-row.workload-object-selected .workload-row-arrow { color: #a8eee6 !important; }
 @media (max-width: 1280px) {
   .cluster-overview-dashboard .overview-quick-actions button,
   main.theme-dark .cluster-overview-dashboard .overview-quick-actions button { padding: 7px 10px; }
@@ -5343,6 +5364,213 @@ main.theme-dark .configuration-remove-key { color: #ffadb8; border-color: #69434
 @media (max-width: 1280px) {
   .cluster-overview-dashboard .overview-quick-actions button,
   main.theme-dark .cluster-overview-dashboard .overview-quick-actions button { padding: 7px 10px !important; }
+}
+
+/* The primary sidebar stays concise. Workload and API kinds live in a stable
+   secondary rail, and each section keeps its own open state. */
+.sidebar.sidebar-flyout-open {
+  z-index: 4;
+  overflow: hidden;
+}
+.workspace-type-rail {
+  width: clamp(272px, 21vw, 324px);
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 clamp(272px, 21vw, 324px);
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--ui-copy);
+  border-right: 1px solid var(--ui-border);
+  background: var(--ui-surface-muted);
+  box-shadow: 8px 0 24px rgba(24, 26, 32, .05);
+  animation: workspace-rail-enter .16s ease-out;
+}
+@keyframes workspace-rail-enter {
+  from { opacity: 0; transform: translateX(-7px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.workspace-type-rail-heading {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 14px 15px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-surface);
+}
+.workspace-type-rail-heading > div { min-width: 0; display: grid; gap: 2px; }
+.workspace-type-rail-heading span {
+  color: var(--ui-muted);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+.workspace-type-rail-heading strong { color: var(--ui-ink); font-size: 15px; font-weight: 850; }
+.workspace-type-rail-heading > button,
+.workspace-type-section > header > button {
+  width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  color: var(--ui-muted);
+  background: var(--ui-surface-muted);
+  font-size: 17px;
+  line-height: 1;
+}
+.workspace-type-rail-heading > button:hover,
+.workspace-type-section > header > button:hover { color: var(--ui-ink); border-color: var(--ui-border-strong); background: var(--ui-surface-strong); }
+.workspace-type-section {
+  min-height: 0;
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-bottom: 1px solid var(--ui-border);
+}
+.workspace-type-rail-split .workspace-type-section { flex-basis: 50%; }
+.workspace-type-section > header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-surface);
+}
+.workspace-type-section > header > div { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.workspace-type-section > header > div > span:last-child { min-width: 0; display: grid; gap: 2px; }
+.workspace-type-section > header strong,
+.workspace-type-section > header small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-type-section > header strong { color: var(--ui-ink); font-size: 12px; font-weight: 850; }
+.workspace-type-section > header small { color: var(--ui-muted); font-size: 9px; }
+.workspace-type-mark {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  color: #21776f;
+  background: #e3f1ef;
+}
+.workspace-resource-tools {
+  display: grid;
+  grid-template-columns: minmax(92px, .72fr) minmax(0, 1.28fr);
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-surface-muted);
+}
+.workspace-resource-tools select,
+.workspace-resource-tools label {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  color: var(--ui-copy);
+  background: var(--ui-surface);
+  font-size: 9.5px;
+}
+.workspace-resource-tools select { padding: 0 7px; }
+.workspace-resource-tools label { display: flex; align-items: center; gap: 6px; padding: 0 8px; }
+.workspace-resource-tools input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--ui-ink); background: transparent; font-size: 9.5px; }
+.workspace-resource-tools input::placeholder { color: var(--ui-muted); }
+.workspace-type-options { min-height: 0; padding: 6px; overflow: auto; }
+.workspace-type-options.sidebar-type-options > button {
+  min-height: 48px;
+  grid-template-columns: 30px minmax(0, 1fr) 18px;
+  gap: 9px;
+  margin-bottom: 2px;
+  padding: 6px 8px;
+  border-radius: 9px;
+}
+.workspace-type-options.sidebar-type-options > button strong { font-size: 11.5px; }
+.workspace-type-options.sidebar-type-options > button small { margin-top: 1px; font-size: 8.5px; }
+.workspace-type-options.sidebar-type-options > button.sidebar-type-selected {
+  color: #181a20;
+  border-color: #b9bab6;
+  background: #fff;
+  box-shadow: inset 3px 0 #258c83, 0 5px 13px rgba(24, 26, 32, .10);
+}
+.workspace-type-options.sidebar-type-options > button.sidebar-type-selected strong,
+.workspace-type-options.sidebar-type-options > button.sidebar-type-selected > b { color: #111318 !important; font-weight: 900; }
+.workspace-type-options.sidebar-type-options > button.sidebar-type-selected small { color: #5e636c !important; }
+main.theme-dark .workspace-type-rail {
+  color: #c5ced8;
+  border-color: #303b49;
+  background: #141a22;
+  box-shadow: 10px 0 28px rgba(0, 0, 0, .25);
+}
+main.theme-dark .workspace-type-rail-heading,
+main.theme-dark .workspace-type-section > header { border-color: #303b49; background: #171e27; }
+main.theme-dark .workspace-type-section { border-color: #303b49; }
+main.theme-dark .workspace-type-mark { color: #9cddd5; background: #1d4a49; }
+main.theme-dark .workspace-resource-tools { border-color: #303b49; background: #141a22; }
+main.theme-dark .workspace-resource-tools select,
+main.theme-dark .workspace-resource-tools label { color: #c6d0db; border-color: #3d4a58; background: #1d2630; }
+main.theme-dark .workspace-resource-tools input { color: #f3f6f9; }
+main.theme-dark .workspace-type-options.sidebar-type-options > button { color: #c5ced8; }
+main.theme-dark .workspace-type-options.sidebar-type-options > button:hover { color: #fff; border-color: #3d4b59; background: #202a35; }
+main.theme-dark .workspace-type-options.sidebar-type-options > button.sidebar-type-selected {
+  color: #fff !important;
+  border-color: #66808d !important;
+  background: linear-gradient(90deg, #314653, #253641) !important;
+  box-shadow: inset 4px 0 #82d8cf, 0 7px 16px rgba(0, 0, 0, .28) !important;
+}
+main.theme-dark .workspace-type-options.sidebar-type-options > button.sidebar-type-selected strong,
+main.theme-dark .workspace-type-options.sidebar-type-options > button.sidebar-type-selected > b { color: #fff !important; font-weight: 900; }
+main.theme-dark .workspace-type-options.sidebar-type-options > button.sidebar-type-selected small { color: #d0dae2 !important; }
+
+/* Selected objects must remain unmistakable in dark mode. The name is the
+   strongest element, while scope, age, and action remain readable secondary
+   information. */
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected,
+main.theme-dark .workload-object-row.workload-object-selected {
+  color: #fff !important;
+  border-color: #6a8793 !important;
+  background: linear-gradient(90deg, #344a57, #263943) !important;
+  box-shadow: inset 4px 0 #8be0d6, 0 6px 15px rgba(0, 0, 0, .28) !important;
+}
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-primary strong,
+main.theme-dark .workload-object-selected .workload-object-name strong {
+  color: #fff !important;
+  font-weight: 900 !important;
+  letter-spacing: .005em;
+}
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-namespace,
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-age,
+main.theme-dark .workload-object-selected .workload-object-name small,
+main.theme-dark .workload-object-selected .workload-row-fact b small { color: #d5dfe6 !important; }
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-action,
+main.theme-dark .workload-object-selected .workload-row-arrow { color: #a8eee6 !important; font-weight: 900 !important; }
+
+@media (max-width: 1320px) {
+  .workspace-type-rail {
+    width: 286px;
+    position: fixed;
+    inset: 0 auto 0 calc(var(--sidebar-width) + 6px);
+    z-index: 80;
+    flex: none;
+    box-shadow: 14px 0 34px rgba(24, 26, 32, .18);
+  }
+  main.theme-dark .workspace-type-rail { box-shadow: 16px 0 38px rgba(0, 0, 0, .42); }
+  .workspace-resource-tools { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-type-rail { animation: none; }
 }
 
 @media (max-width: 760px) {
