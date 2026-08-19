@@ -211,6 +211,7 @@ struct PodLogRequest {
     namespace: String,
     pod: String,
     container: Option<String>,
+    since_time: Option<String>,
     tail_lines: Option<i64>,
 }
 
@@ -439,6 +440,14 @@ fn node_time_string(
     time: Option<&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time>,
 ) -> Option<String> {
     time.map(|value| value.0.to_string())
+}
+
+fn days_remaining_from_seconds(seconds: i64) -> i64 {
+    if seconds >= 0 {
+        (seconds.saturating_add(86_399)) / 86_400
+    } else {
+        -((-seconds).saturating_add(86_399) / 86_400)
+    }
 }
 
 fn resolve_local_path(input: &str) -> PathBuf {
@@ -1140,7 +1149,8 @@ fn certificate_info(manifest: &Value) -> Option<CertificateInfo> {
         let expiry = chrono::DateTime::parse_from_rfc3339(expires_at)
             .ok()?
             .with_timezone(&Utc);
-        let days_remaining = (expiry.timestamp() - Utc::now().timestamp()) / 86_400;
+        let days_remaining =
+            days_remaining_from_seconds(expiry.timestamp() - Utc::now().timestamp());
         return Some(CertificateInfo {
             expires_at: expiry.to_rfc3339(),
             days_remaining,
@@ -1160,7 +1170,7 @@ fn certificate_info(manifest: &Value) -> Option<CertificateInfo> {
             .not_after
             .timestamp()
     };
-    let days_remaining = (expiry_timestamp - Utc::now().timestamp()) / 86_400;
+    let days_remaining = days_remaining_from_seconds(expiry_timestamp - Utc::now().timestamp());
     let expires_at = chrono::DateTime::from_timestamp(expiry_timestamp, 0)?.to_rfc3339();
     Some(CertificateInfo {
         expires_at,
@@ -1494,7 +1504,9 @@ async fn client_for(path: Option<String>, context: Option<String>) -> Result<Cli
         .lock()
         .map_err(|_| "Kuberniva's Kubernetes client cache is unavailable".to_string())?;
     if cache.len() >= 64 {
-        cache.clear();
+        if let Some(evicted_key) = cache.keys().next().cloned() {
+            cache.remove(&evicted_key);
+        }
     }
     cache.insert(cache_key, client.clone());
     Ok(client)
@@ -1636,14 +1648,20 @@ async fn discover_cluster_catalog(
             .then(left.kind.cmp(&right.kind))
     });
 
-    let namespaces: BTreeSet<String> = Api::<Namespace>::all(client)
+    let namespaces: BTreeSet<String> = match Api::<Namespace>::all(client)
         .list(&ListParams::default())
         .await
-        .map_err(|error| error.to_string())?
-        .items
-        .into_iter()
-        .filter_map(|namespace| namespace.metadata.name)
-        .collect();
+    {
+        Ok(response) => response
+            .items
+            .into_iter()
+            .filter_map(|namespace| namespace.metadata.name)
+            .collect(),
+        Err(error) => {
+            log::warn!("Could not list namespaces while discovering the API catalog: {error}");
+            BTreeSet::new()
+        }
+    };
 
     Ok(ClusterCatalog {
         context: selected_context,
@@ -2445,14 +2463,27 @@ async fn read_pod_logs(request: PodLogRequest) -> Result<PodLogResponse, String>
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let tail_lines = request.tail_lines.unwrap_or(500).clamp(1, 5_000);
+    let since_seconds = request
+        .since_time
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|timestamp| {
+            Utc::now()
+                .signed_duration_since(timestamp.with_timezone(&Utc))
+                .num_seconds()
+                .max(1)
+        });
+    let tail_lines = since_seconds
+        .is_none()
+        .then(|| request.tail_lines.unwrap_or(500).clamp(1, 5_000));
     let selected_container = request.container.or_else(|| containers.first().cloned());
     let output = pods
         .logs(
             &request.pod,
             &LogParams {
                 container: selected_container.clone(),
-                tail_lines: Some(tail_lines),
+                since_seconds,
+                tail_lines,
                 timestamps: true,
                 ..Default::default()
             },
@@ -2670,8 +2701,9 @@ fn command_has_context_flag(tokens: &[String]) -> bool {
     tokens.iter().any(|token| {
         matches!(
             token.as_str(),
-            "--context" | "--kubeconfig" | "--namespace" | "-n"
+            "--context" | "--kube-context" | "--kubeconfig" | "--namespace" | "-n"
         ) || token.starts_with("--context=")
+            || token.starts_with("--kube-context=")
             || token.starts_with("--kubeconfig=")
             || token.starts_with("--namespace=")
             || token.starts_with("-n=")
@@ -2754,6 +2786,10 @@ async fn run_cluster_command(request: KubeCliRequest) -> Result<KubeCliResponse,
     let tool = tokens[0].clone();
     let tool_is_kubectl = command_is(&tool, "kubectl");
     let tool_is_helm = command_is(&tool, "helm");
+    if request.shell && (tool_is_kubectl || tool_is_helm) && command_has_context_flag(&tokens[1..])
+    {
+        return Err("Kuberniva supplies the active kubeconfig, context, and namespace automatically, including shell mode. Remove --context/--kube-context/--kubeconfig/--namespace from the command.".to_string());
+    }
     let mut process;
     if request.shell {
         let shell_command = cluster_shell_command(command, &request);
@@ -2764,7 +2800,7 @@ async fn run_cluster_command(request: KubeCliRequest) -> Result<KubeCliResponse,
         let mut args = tokens[1..].to_vec();
         if tool_is_kubectl || tool_is_helm {
             if command_has_context_flag(&args) {
-                return Err("Kuberniva supplies the active kubeconfig, context, and namespace automatically. Remove --context/--kubeconfig/--namespace from the command.".to_string());
+                return Err("Kuberniva supplies the active kubeconfig, context, and namespace automatically. Remove --context/--kube-context/--kubeconfig/--namespace from the command.".to_string());
             }
             let mut injected = Vec::with_capacity(args.len() + 7);
             if let Some(path) = request
@@ -3389,6 +3425,34 @@ mod tests {
         assert_eq!(format_cpu_usage(0.002), "0.002 cores");
         assert_eq!(format_cpu_usage(0.1), "0.1 cores");
         assert_eq!(format_cpu_usage(1.25), "1.25 cores");
+    }
+
+    #[test]
+    fn rounds_certificate_days_away_from_zero_for_partial_days() {
+        assert_eq!(days_remaining_from_seconds(0), 0);
+        assert_eq!(days_remaining_from_seconds(43_200), 1);
+        assert_eq!(days_remaining_from_seconds(86_400), 1);
+        assert_eq!(days_remaining_from_seconds(-43_200), -1);
+        assert_eq!(days_remaining_from_seconds(-86_400), -1);
+    }
+
+    #[test]
+    fn recognizes_workspace_flags_for_shell_commands() {
+        assert!(command_has_context_flag(&[
+            "--context=other".to_string(),
+            "get".to_string(),
+        ]));
+        assert!(command_has_context_flag(&[
+            "-n".to_string(),
+            "other".to_string()
+        ]));
+        assert!(command_has_context_flag(&[
+            "--kube-context=other".to_string()
+        ]));
+        assert!(!command_has_context_flag(&[
+            "get".to_string(),
+            "pods".to_string()
+        ]));
     }
 
     #[test]

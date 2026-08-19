@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/onlysvijay-collab/Kuberniva/releases"><img src="https://img.shields.io/badge/version-0.3.2-1769aa?style=flat-square" alt="Version 0.3.2"></a>
+  <a href="https://github.com/onlysvijay-collab/Kuberniva/releases"><img src="https://img.shields.io/badge/version-0.3.4-1769aa?style=flat-square" alt="Version 0.3.4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f855a?style=flat-square" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/Svelte%205-ff3e00?style=flat-square&logo=svelte&logoColor=white" alt="Svelte 5">
   <img src="https://img.shields.io/badge/Tauri%202-24c8db?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
