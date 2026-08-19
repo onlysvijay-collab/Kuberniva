@@ -1,0 +1,101 @@
+export const visualQaCluster = {
+  id: 'visual-qa-cluster',
+  name: 'qa-production-west',
+  provider: 'Kubernetes',
+  status: 'Connected',
+  tone: 'green',
+  authMethod: 'OIDC',
+  namespace: 'platform',
+  kubeconfigPath: '/tmp/kuberniva-visual-qa.yaml',
+};
+
+export const visualQaResources = [
+  { group: 'apps', version: 'v1', apiVersion: 'apps/v1', kind: 'Deployment', plural: 'deployments', namespaced: true, category: 'Workloads', custom: false, crd: false },
+  { group: '', version: 'v1', apiVersion: 'v1', kind: 'Pod', plural: 'pods', namespaced: true, category: 'Workloads', custom: false, crd: false },
+  { group: '', version: 'v1', apiVersion: 'v1', kind: 'ConfigMap', plural: 'configmaps', namespaced: true, category: 'Configuration', custom: false, crd: false },
+  { group: '', version: 'v1', apiVersion: 'v1', kind: 'Secret', plural: 'secrets', namespaced: true, category: 'Configuration', custom: false, crd: false },
+  { group: '', version: 'v1', apiVersion: 'v1', kind: 'Service', plural: 'services', namespaced: true, category: 'Network', custom: false, crd: false },
+  { group: 'gateway.networking.k8s.io', version: 'v1', apiVersion: 'gateway.networking.k8s.io/v1', kind: 'HTTPRoute', plural: 'httproutes', namespaced: true, category: 'Gateway APIs', custom: true, crd: true },
+];
+
+export const visualQaPods = [
+  ['api-7d8496f6d9-2wkd8', 'Running', '2/2', '0.042 cores', '184Mi', '18m'],
+  ['api-7d8496f6d9-jg6h4', 'Running', '2/2', '0.038 cores', '176Mi', '18m'],
+  ['worker-6ff5d79c75-8zq7t', 'Running', '1/1', '0.116 cores', '412Mi', '2h'],
+  ['worker-6ff5d79c75-wf5kp', 'Running', '1/1', '0.093 cores', '396Mi', '2h'],
+  ['scheduler-5fc7d47868-p6c9m', 'Running', '1/1', '0.018 cores', '128Mi', '1d'],
+  ['metrics-7d6c6bb7fc-f4kz2', 'Pending', '0/1', '0 cores', '0Mi', '42s'],
+].map(([name, status, ready, cpuUsage, memoryUsage, age], index) => {
+  const [readyContainers, totalContainers] = ready.split('/').map(Number);
+  const ageMinutes = age.endsWith('m') ? Number(age.slice(0, -1)) : age.endsWith('h') ? Number(age.slice(0, -1)) * 60 : age.endsWith('d') ? Number(age.slice(0, -1)) * 1440 : 1;
+  return {
+    name,
+    namespace: 'platform',
+    uid: `visual-pod-${index + 1}`,
+    resourceVersion: `${4100 + index}`,
+    createdAt: new Date(Date.now() - ageMinutes * 60_000).toISOString(),
+    status,
+    readyContainers,
+    totalContainers,
+    restarts: index === 2 ? 1 : 0,
+    cpuUsage,
+    memoryUsage,
+    nodeName: `worker-${(index % 2) + 1}`,
+  };
+});
+
+export const visualQaConfigMaps = [
+  'api-settings',
+  'feature-flags',
+  'gateway-routing',
+  'logging-config',
+  'worker-environment',
+].map((name, index) => ({
+  name,
+  namespace: 'platform',
+  uid: `visual-config-${index + 1}`,
+  resourceVersion: `${5100 + index}`,
+  createdAt: new Date(Date.now() - (index + 1) * 3_600_000).toISOString(),
+}));
+
+export const visualQaConfigValues = {
+  'APP_MODE': 'production',
+  'FEATURE_FLAGS': 'newNavigation=true\nbulkActions=true\ncompactOverview=true',
+  'pod-template.yaml': 'apiVersion: v1\nkind: Pod\nmetadata:\n  labels:\n    app: worker\nspec:\n  serviceAccountName: platform-worker\n  containers:\n    - name: worker\n      image: example.invalid/worker:2.4.1',
+  'retention.json': '{\n  "logs": "14d",\n  "events": "7d",\n  "snapshots": "30d"\n}',
+};
+
+export const visualQaSecretValues = {
+  username: 'cGxhdGZvcm0tYWRtaW4=',
+  password: 'dmlzdWFsLXFhLW9ubHk=',
+  'tls.crt': 'LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tXG5WSVNVQUwtUUEtQ0VSVElGSUNBVEVcbi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0=',
+};
+
+const nodeBase = {
+  ready: true,
+  roles: ['worker'],
+  labels: [{ key: 'kubernetes.io/arch', value: 'arm64' }],
+  annotations: [],
+  conditions: [{ type: 'Ready', status: 'True', reason: 'KubeletReady', message: 'kubelet is posting ready status' }],
+  taints: [],
+  architecture: 'arm64',
+  operatingSystem: 'linux',
+  osImage: 'Ubuntu 24.04 LTS',
+  kernelVersion: '6.8.0',
+  kubeletVersion: 'v1.32.4',
+  containerRuntimeVersion: 'containerd://2.0.3',
+  podCidrs: ['10.42.0.0/24'],
+  unschedulable: false,
+  capacity: [{ key: 'cpu', value: '8 cores' }, { key: 'memory', value: '32Gi' }, { key: 'pods', value: '110' }],
+  allocatable: [{ key: 'cpu', value: '7.8 cores' }, { key: 'memory', value: '30Gi' }, { key: 'pods', value: '110' }],
+};
+
+export const visualQaOverview = {
+  nodes: [
+    { ...nodeBase, name: 'worker-1', uid: 'visual-node-1', addresses: [{ type: 'InternalIP', address: '10.0.12.21' }], providerId: 'qa://worker-1', creationTimestamp: new Date(Date.now() - 14 * 86_400_000).toISOString(), cpuCapacity: '8 cores', memoryCapacity: '32Gi', cpuUsage: '3.12 cores', memoryUsage: '14.6Gi', cpuUsagePercent: 39, memoryUsagePercent: 46 },
+    { ...nodeBase, name: 'worker-2', uid: 'visual-node-2', addresses: [{ type: 'InternalIP', address: '10.0.12.22' }], providerId: 'qa://worker-2', creationTimestamp: new Date(Date.now() - 14 * 86_400_000).toISOString(), cpuCapacity: '8 cores', memoryCapacity: '32Gi', cpuUsage: '2.47 cores', memoryUsage: '11.2Gi', cpuUsagePercent: 31, memoryUsagePercent: 35 },
+  ],
+  totals: { cpuCapacity: '16 cores', memoryCapacity: '64Gi', storageCapacity: '480Gi', cpuUsage: '5.59 cores', memoryUsage: '25.8Gi', cpuUsagePercent: 35, memoryUsagePercent: 40, metricNodes: 2 },
+  metricsAvailable: true,
+  observedAt: new Date().toISOString(),
+};

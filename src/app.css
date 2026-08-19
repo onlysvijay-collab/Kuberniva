@@ -5178,6 +5178,181 @@ main.theme-dark .cluster-overview-dashboard .overview-quick-actions small {
 }
 .cluster-overview-dashboard .overview-quick-actions b,
 main.theme-dark .cluster-overview-dashboard .overview-quick-actions b { font-size: 14px; }
+@media (max-width: 1280px) {
+  .cluster-overview-dashboard .overview-quick-actions button,
+  main.theme-dark .cluster-overview-dashboard .overview-quick-actions button { padding: 7px 10px; }
+}
+
+/* Workload and API types expand in place, keeping navigation and content in
+   one predictable sidebar instead of opening a detached overlay. */
+.sidebar.sidebar-flyout-open { z-index: auto; overflow-x: hidden; overflow-y: auto; }
+.sidebar-accordion-trigger { position: relative; }
+.sidebar-nav-label { min-width: 0; flex: 1; }
+.sidebar-accordion-trigger .count { margin-left: 0; }
+.sidebar-accordion-chevron { flex: 0 0 auto; margin-left: 2px; transition: transform .16s ease; }
+.sidebar-type-open > .sidebar-accordion-trigger .sidebar-accordion-chevron { transform: rotate(180deg); }
+.sidebar-inline-subnav {
+  max-height: min(330px, 42dvh);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 3px 2px 8px 15px;
+  padding: 3px 0 3px 8px;
+  overflow: hidden;
+  border-left: 1px solid var(--ui-border);
+}
+.sidebar-inline-options { overflow: auto; padding: 1px 3px 2px 0; }
+.sidebar-inline-subnav .sidebar-type-options > button {
+  min-height: 34px;
+  grid-template-columns: 22px minmax(0, 1fr) 15px;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 7px;
+}
+.sidebar-inline-subnav .sidebar-type-icon { width: 22px; height: 22px; border-radius: 6px; font-size: 11px; }
+.sidebar-inline-subnav .sidebar-type-options > button strong { font-size: 10.5px; }
+.sidebar-inline-subnav .sidebar-type-options > button small { margin-top: 0; font-size: 8px; }
+.sidebar-inline-tools { display: grid; gap: 5px; flex: 0 0 auto; padding: 2px 3px 6px 0; }
+.sidebar-inline-tools select,
+.sidebar-inline-tools label {
+  min-height: 30px;
+  width: 100%;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  color: var(--ui-copy);
+  background: var(--ui-surface-strong);
+  font-size: 9px;
+}
+.sidebar-inline-tools select { padding: 0 7px; }
+.sidebar-inline-tools label { display: flex; align-items: center; gap: 5px; padding: 0 7px; }
+.sidebar-inline-tools input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--ui-ink); background: transparent; font-size: 9px; }
+main.theme-dark .sidebar-inline-subnav { border-color: #35414e; }
+main.theme-dark .sidebar-inline-tools select,
+main.theme-dark .sidebar-inline-tools label { color: #c5d0db; border-color: #3c4957; background: #1b232d; }
+main.theme-dark .sidebar-inline-tools input { color: #edf2f6; }
+
+/* ConfigMaps and Secrets show every entry together. The object name in the
+   drawer already supplies context, so the editor needs only values and actions. */
+.configuration-values-editor {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin: 8px;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 11px;
+  background: var(--ui-surface-muted);
+}
+.configuration-values-editor > header {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-surface-strong);
+}
+.configuration-values-editor > header > div:first-child { min-width: 0; display: grid; gap: 2px; }
+.configuration-values-editor > header strong { color: var(--ui-ink); font-size: 13px; }
+.configuration-values-editor > header small { color: var(--ui-muted); font-size: 9px; }
+.configuration-values-editor > header > div:last-child { display: flex; align-items: center; gap: 6px; }
+.configuration-add-key,
+.configuration-values-empty button {
+  min-height: 29px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  color: var(--ui-ink);
+  background: #fff;
+  font-size: 9px;
+  font-weight: 800;
+}
+.configuration-entry-list {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 8px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+.configuration-entry {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(110px, .48fr) minmax(0, 1.52fr) 28px;
+  align-items: start;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 9px;
+  background: #fff;
+}
+.configuration-entry label { min-width: 0; display: grid; gap: 4px; }
+.configuration-entry label > span { color: var(--ui-muted); font-size: 8px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.configuration-entry input,
+.configuration-entry textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--ui-ink);
+  background: var(--ui-surface-strong);
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.configuration-entry input { height: 36px; font-weight: 700; }
+.configuration-entry textarea { min-height: 36px; max-height: min(42vh, 420px); resize: vertical; }
+.configuration-entry input:focus,
+.configuration-entry textarea:focus { border-color: #8f86df; box-shadow: 0 0 0 3px rgba(111, 99, 221, .10); }
+.configuration-remove-key {
+  width: 28px;
+  height: 28px;
+  margin-top: 20px;
+  border: 1px solid #ecd2d7;
+  border-radius: 7px;
+  color: #ad5060;
+  background: #fff5f6;
+  font-size: 15px;
+}
+.configuration-values-hint { margin: 0; padding: 7px 10px; border-top: 1px solid var(--ui-border); color: var(--ui-muted); background: var(--ui-surface-strong); font-size: 9px; line-height: 1.4; }
+.configuration-values-empty { min-height: 150px; display: grid; place-items: center; align-content: center; gap: 8px; color: var(--ui-muted); font-size: 10px; }
+main.theme-dark .configuration-values-editor { border-color: #35414e; background: #171e27; }
+main.theme-dark .configuration-values-editor > header,
+main.theme-dark .configuration-values-hint { border-color: #35414e; background: #202832; }
+main.theme-dark .configuration-entry { border-color: #35414e; background: #1b232d; }
+main.theme-dark .configuration-entry input,
+main.theme-dark .configuration-entry textarea { color: #edf2f6; border-color: #43515f; background: #121820; }
+main.theme-dark .configuration-add-key,
+main.theme-dark .configuration-values-empty button { color: #edf2f6; border-color: #455362; background: #29343f; }
+main.theme-dark .configuration-remove-key { color: #ffadb8; border-color: #69434c; background: #321f25; }
+
+@container resource-inspector (max-width: 460px) {
+  .configuration-entry { grid-template-columns: minmax(0, 1fr) 28px; }
+  .configuration-entry > label:first-child { grid-column: 1 / -1; }
+  .configuration-entry-value { grid-column: 1; }
+  .configuration-remove-key { grid-column: 2; grid-row: 2; }
+}
+
+@media (max-width: 1280px) {
+  .cluster-overview-dashboard .overview-quick-actions button,
+  main.theme-dark .cluster-overview-dashboard .overview-quick-actions button { padding: 7px 10px !important; }
+}
+
+@media (max-width: 760px) {
+  .sidebar-inline-subnav { max-height: 280px; }
+  .configuration-values-editor > header { align-items: flex-start; flex-direction: column; }
+  .configuration-entry { grid-template-columns: minmax(0, 1fr) 28px; }
+  .configuration-entry > label:first-child { grid-column: 1 / -1; }
+  .configuration-entry-value { grid-column: 1; }
+  .configuration-remove-key { grid-column: 2; grid-row: 2; }
+}
 .cluster-overview-dashboard .node-overview { grid-column: 1 / -1; grid-row: 2; }
 .cluster-overview-dashboard .node-overview .panel-heading { min-height: 54px; padding: 9px 14px 8px; }
 .cluster-overview-dashboard .node-overview .panel-heading .eyebrow { margin-bottom: 2px; }
@@ -5699,6 +5874,13 @@ main.theme-dark .bulk-delete-progress { color: #e1c183; }
 
 /* Loaded is a valid current snapshot even when the optional watch channel is
    reconnecting or forbidden by RBAC. Keep it visually distinct from stale. */
+.live-status-loading {
+  color: #5e5a9d;
+  border-color: #d9d3f2;
+  background: #f6f4ff;
+}
+.live-status-loading b { background: #8277d4; box-shadow: 0 0 7px rgba(130, 119, 212, .5); }
+.resource-live-status.live-status-loading > i { background: #8277d4; box-shadow: 0 0 0 3px rgba(130, 119, 212, .13); }
 .live-status-loaded {
   color: #2f7180;
   border-color: #c5e2e7;
@@ -5713,6 +5895,13 @@ main.theme-dark .live-status-loaded {
 }
 main.theme-dark .live-status-loaded b { background: #74c1ce; box-shadow: 0 0 8px rgba(116, 193, 206, .58); }
 main.theme-dark .resource-live-status.live-status-loaded > i { background: #74c1ce; box-shadow: 0 0 0 3px rgba(116, 193, 206, .15); }
+main.theme-dark .live-status-loading {
+  color: #c8c1ff;
+  border-color: rgba(151, 139, 255, .42);
+  background: rgba(113, 101, 235, .18);
+}
+main.theme-dark .live-status-loading b { background: #a59aff; box-shadow: 0 0 8px rgba(165, 154, 255, .58); }
+main.theme-dark .resource-live-status.live-status-loading > i { background: #a59aff; box-shadow: 0 0 0 3px rgba(165, 154, 255, .15); }
 
 /* Theme geometry parity: appearance changes color, never box dimensions. */
 .workload-grid,
@@ -5815,3 +6004,105 @@ main.theme-dark .sidebar-type-options > button small { font-size: 8.5px; }
     --workload-columns: minmax(132px, 1fr) 76px 50px 16px;
   }
 }
+
+/* Dark selections stay inside the graphite palette. White selected surfaces
+   made labels disappear and visually resized rows when switching themes. */
+main.theme-dark .nav-item.active,
+main.theme-dark .favorite-shortcut.favorite-shortcut-active,
+main.theme-dark .cluster-list-row.cluster-list-active,
+main.theme-dark .node-list button.node-list-active,
+main.theme-dark .events-filter button.active,
+main.theme-dark .workload-type-button.workload-type-active,
+main.theme-dark .workload-object-row.workload-object-selected,
+main.theme-dark .resource-kind-list > button.resource-kind-active,
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected,
+main.theme-dark .sidebar-type-options > button.sidebar-type-selected,
+main.theme-dark .resource-category-tabs button.resource-category-active,
+main.theme-dark .resource-category-more-menu > button.resource-category-more-selected,
+main.theme-dark .sidebar-resource-category-tabs > button.sidebar-resource-category-active,
+main.theme-dark .namespace-menu button.namespace-selected,
+main.theme-dark .focus-canvas-key.focus-canvas-key-active,
+main.theme-dark .terminal-pod-strip button.terminal-pod-selected,
+main.theme-dark .kubeconfig-source-modes > button.source-mode-active,
+main.theme-dark .global-namespace-trigger[aria-expanded="true"] {
+  color: #f3f7fa !important;
+  border-color: #526577 !important;
+  background: linear-gradient(90deg, #293846, #222d38) !important;
+  box-shadow: inset 3px 0 #74c1ce, 0 4px 12px rgba(0, 0, 0, .24) !important;
+}
+main.theme-dark .workload-object-selected .workload-object-name strong,
+main.theme-dark .workload-object-selected .workload-row-fact b:not(.workload-status-label),
+main.theme-dark .workload-object-selected .workload-row-age b,
+main.theme-dark .workload-object-selected .workload-row-arrow,
+main.theme-dark .resource-workbench .resource-object-browser .object-selected .resource-object-primary strong,
+main.theme-dark .resource-workbench .resource-object-browser .object-selected .resource-object-action,
+main.theme-dark .resource-kind-list > button.resource-kind-active > div > strong,
+main.theme-dark .sidebar-type-options > button.sidebar-type-selected strong,
+main.theme-dark .sidebar-type-options > button.sidebar-type-selected > b,
+main.theme-dark .resource-category-tabs button.resource-category-active b,
+main.theme-dark .resource-category-more-menu > button.resource-category-more-selected strong,
+main.theme-dark .resource-category-more-menu > button.resource-category-more-selected b,
+main.theme-dark .sidebar-resource-category-tabs > button.sidebar-resource-category-active > span,
+main.theme-dark .sidebar-resource-category-tabs > button.sidebar-resource-category-active > b,
+main.theme-dark .focus-canvas-key.focus-canvas-key-active span,
+main.theme-dark .cluster-list-active .cluster-list-name strong,
+main.theme-dark .cluster-list-active .cluster-list-auth,
+main.theme-dark .cluster-list-active .cluster-list-arrow,
+main.theme-dark .node-list-active strong,
+main.theme-dark .node-list-active b,
+main.theme-dark .nav-item.active .nav-icon,
+main.theme-dark .nav-item.active .count {
+  color: #f3f7fa !important;
+}
+main.theme-dark .workload-object-selected .workload-object-name small,
+main.theme-dark .workload-object-selected .workload-row-fact b small,
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-namespace,
+main.theme-dark .resource-workbench .resource-object-browser .object-list button.object-selected .resource-object-age,
+main.theme-dark .resource-kind-list > button.resource-kind-active > div > small,
+main.theme-dark .sidebar-type-options > button.sidebar-type-selected small,
+main.theme-dark .resource-category-more-menu > button.resource-category-more-selected small,
+main.theme-dark .cluster-list-active .cluster-list-name small,
+main.theme-dark .cluster-list-active .cluster-list-source,
+main.theme-dark .cluster-list-active .cluster-list-status,
+main.theme-dark .node-list-active small {
+  color: #b5c2ce !important;
+}
+main.theme-dark .nav-item.active .count,
+main.theme-dark .resource-category-tabs button.resource-category-active b,
+main.theme-dark .sidebar-resource-category-tabs > button.sidebar-resource-category-active b {
+  background: #344755 !important;
+}
+main.theme-dark .workload-type-button.workload-type-active > svg,
+main.theme-dark .sidebar-type-options > button.sidebar-type-selected .sidebar-type-icon,
+main.theme-dark .resource-kind-list > button.resource-kind-active > span {
+  color: #9cddd5 !important;
+  background: #1c4a4b !important;
+}
+
+/* Overview cards use identical geometry in light and dark; only their color
+   tokens differ. */
+main.theme-dark .cluster-overview-dashboard { gap: 10px; }
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions {
+  gap: 8px;
+  margin: 0;
+}
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions button {
+  min-height: 0;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+}
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions button > span {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 14px;
+}
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions em { font-size: 9px; }
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions strong { font-size: 12px; }
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions small {
+  max-width: 175px;
+  font-size: 9px;
+  line-height: 1.35;
+}
+main.theme-dark .cluster-overview-dashboard .overview-quick-actions b { font-size: 14px; }

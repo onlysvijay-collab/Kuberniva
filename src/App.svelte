@@ -51,7 +51,7 @@
   type KubeCliResponse = { stdout: string; stderr: string; exitCode?: number; success: boolean };
   type ResourceWatchSignal = { watchId: string; action: string; error?: string };
   type ResourceWatchStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
-  type LiveDataStatus = 'live' | 'loaded' | 'stale' | 'paused' | 'unavailable';
+  type LiveDataStatus = 'loading' | 'live' | 'loaded' | 'stale' | 'paused' | 'unavailable';
   type LiveRefreshContext = { clusterId: string; view: View; dataKey: string };
   type ClusterSession = { namespace: string; selectedCategory: ResourceCategory | 'All resources'; resourceSearch: string; workloadResource: ResourceDescriptor | null; workloadObjects: ResourceObject[]; workloadSearch: string; clusterOverview: ClusterOverview | null };
   type PersistedWorkspace = { version: 7; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string>; portForwards?: SavedPortForward[]; theme?: ThemeMode };
@@ -142,7 +142,6 @@
   let editorObject: ResourceObject | null = null;
   let editorManifest: Record<string, unknown> | null = null;
   let editorEntries: EditorEntry[] = [];
-  let focusedEditorEntry = 0;
   let editorCertificate: CertificateInfo | undefined;
   let loadingEditor = false;
   let savingEditor = false;
@@ -199,6 +198,9 @@
   let resourceWatchStatus: ResourceWatchStatus = 'idle';
   let liveDataStatus: LiveDataStatus = 'unavailable';
   let liveDataStatusMessage = '';
+  let liveDataStatusText = 'Unavailable';
+  let liveDataStatusTooltip = 'Live data is unavailable';
+  let pageContextCopy = '';
   let resumeRecoveryPending = false;
   let resumeRecoveryContext: LiveRefreshContext | null = null;
   let lastHiddenAt = 0;
@@ -262,6 +264,22 @@
   $: selectedWorkloadObjects = workloadObjects.filter((object) => selectedWorkloadObjectKeys.includes(resourceObjectSelectionKey(object)));
   $: allWorkloadObjectsSelected = workloadObjects.length > 0 && selectedWorkloadObjects.length === workloadObjects.length;
   $: workloadObjectsSelectionPartial = selectedWorkloadObjects.length > 0 && !allWorkloadObjectsSelected;
+  $: liveDataStatusText = liveDataStatus === 'loading' ? 'Loading'
+    : liveDataStatus === 'paused' ? 'Paused'
+      : liveDataStatus === 'stale' ? 'Stale'
+        : liveDataStatus === 'loaded' ? 'Loaded'
+          : liveDataStatus === 'unavailable' ? 'Unavailable' : 'Live';
+  $: liveDataStatusTooltip = liveDataStatusMessage
+    || (liveDataStatus === 'live' ? 'Live updates are current'
+      : liveDataStatus === 'loading' ? 'Loading the current Kubernetes API snapshot'
+        : liveDataStatus === 'loaded' ? 'The current API snapshot is loaded; live updates are not connected.'
+          : 'Live updates will resume when data is available and no active workflow is open');
+  $: pageContextCopy = !activeClusterId ? (connectedKubeconfig ? 'Choose a cluster from the sidebar to connect.' : '')
+    : !['Workloads', 'Resources'].includes(activeView) ? ''
+      : liveDataStatus === 'paused' ? 'Live refresh is paused while your current workflow stays open.'
+        : liveDataStatus === 'stale' ? 'Live data is stale. Refresh when you are ready.'
+          : liveDataStatus === 'loaded' ? 'Current API snapshot loaded; live updates are unavailable. Refresh when needed.'
+            : liveDataStatus === 'unavailable' ? 'Live data is unavailable. Kuberniva will preserve this workspace until it can refresh safely.' : '';
   $: categoryCounts = Object.fromEntries(resourceCategories.map((category) => [category, resourceWorkspaceResources.filter((resource) => resource.category === category).length]));
   $: showClusterWorkspaceControls = Boolean(activeClusterId) && ['Overview', 'Events', 'Resources', 'Workloads', 'Logs', 'CLI'].includes(activeView);
   $: refreshingCurrentView = refreshingCluster || loadingCatalog || (activeView === 'Overview'
@@ -309,7 +327,6 @@
   $: editorLogsOpening = editorResource && editorObject
     ? isOpeningLogs(editorResource.kind, editorObject)
     : false;
-  $: focusedEditorEntryData = editorEntries[focusedEditorEntry] || null;
 
   function autoSizeTextarea(node: HTMLTextAreaElement, _value: string) {
     const resize = () => {
@@ -779,31 +796,6 @@
     liveDataStatusMessage = message;
   }
 
-  function liveDataStatusLabel() {
-    if (liveDataStatus === 'paused') return 'Paused';
-    if (liveDataStatus === 'stale') return 'Stale';
-    if (liveDataStatus === 'loaded') return 'Loaded';
-    if (liveDataStatus === 'unavailable') return 'Unavailable';
-    return 'Live';
-  }
-
-  function liveDataStatusTitle() {
-    if (liveDataStatusMessage) return liveDataStatusMessage;
-    if (liveDataStatus === 'live') return 'Live updates are current';
-    if (liveDataStatus === 'loaded') return 'The current API snapshot is loaded; live updates are not connected.';
-    return 'Live updates will resume when data is available and no active workflow is open';
-  }
-
-  function pageContextDescription() {
-    if (!activeClusterId) return connectedKubeconfig ? 'Choose a cluster from the sidebar to connect.' : '';
-    if (!['Workloads', 'Resources'].includes(activeView)) return '';
-    if (liveDataStatus === 'paused') return 'Live refresh is paused while your current workflow stays open.';
-    if (liveDataStatus === 'stale') return 'Live data is stale. Refresh when you are ready.';
-    if (liveDataStatus === 'loaded') return 'Current API snapshot loaded; live updates are unavailable. Refresh when needed.';
-    if (liveDataStatus === 'unavailable') return 'Live data is unavailable. Kuberniva will preserve this workspace until it can refresh safely.';
-    return '';
-  }
-
   function activeLiveDataNeedsRecovery() {
     const key = activeLiveDataKey();
     if (!key) return false;
@@ -916,7 +908,99 @@
     clearLiveDataFreshness(clusterId);
   }
 
+  async function restoreVisualQaScenario() {
+    if (!import.meta.env.DEV) return false;
+    const scenario = new URLSearchParams(window.location.search).get('visual-qa');
+    if (!scenario || !['overview', 'workloads', 'workloads-first-open', 'resources', 'configuration', 'secret'].includes(scenario)) return false;
+    const fixtures = await import('./dev/visual-qa-fixtures');
+    const qaCluster = fixtures.visualQaCluster as Cluster;
+    const qaResources = fixtures.visualQaResources as ResourceDescriptor[];
+    clusters = [qaCluster];
+    connectedKubeconfig = true;
+    sourceConfigured = true;
+    kubeconfigPath = qaCluster.kubeconfigPath || '';
+    activeKubeconfigPath = qaCluster.kubeconfigPath;
+    activeClusterId = qaCluster.id;
+    activeCluster = qaCluster.name;
+    namespace = 'platform';
+    catalog = { context: qaCluster.name, namespaces: ['platform', 'payments'], resources: qaResources };
+    catalogCache.set(qaCluster.id, catalog);
+    catalogError = '';
+    loadingCatalog = false;
+    if (scenario === 'overview') {
+      activeView = 'Overview';
+      clusterOverview = fixtures.visualQaOverview as ClusterOverview;
+      selectedNodeName = clusterOverview.nodes[0]?.name || '';
+    } else if (scenario === 'workloads' || scenario === 'workloads-first-open') {
+      activeView = 'Workloads';
+      workloadResource = qaResources.find((resource) => resource.kind === 'Pod') || null;
+      workloadObjects = scenario === 'workloads-first-open' ? [] : fixtures.visualQaPods as ResourceObject[];
+      loadingWorkloads = scenario === 'workloads-first-open';
+      if (workloadResource) {
+        const key = resourceObjectCacheKey(qaCluster.id, workloadResource, namespace);
+        if (scenario === 'workloads-first-open') {
+          liveDataStatus = 'loading';
+          liveDataStatusMessage = 'Loading the current Kubernetes API snapshot';
+          window.setTimeout(() => {
+            if (activeView !== 'Workloads' || activeClusterId !== qaCluster.id || !workloadResource) return;
+            workloadObjects = fixtures.visualQaPods as ResourceObject[];
+            loadingWorkloads = false;
+            resourceObjectCache.set(key, workloadObjects);
+            markLiveDataAvailable(workloadResource, qaCluster.id, namespace, 'Workloads');
+          }, 1_200);
+          window.setTimeout(() => {
+            if (activeView !== 'Workloads' || activeClusterId !== qaCluster.id || !workloadResource) return;
+            resourceWatchStatus = 'connected';
+            resourceWatchClusterId = qaCluster.id;
+            resourceWatchView = 'Workloads';
+            resourceWatchDataKey = key;
+            markLiveDataAvailable(workloadResource, qaCluster.id, namespace, 'Workloads');
+          }, 2_200);
+        } else {
+          resourceObjectCache.set(key, workloadObjects);
+          liveDataUpdatedAt.set(key, Date.now());
+          resourceWatchStatus = 'connected';
+          resourceWatchClusterId = qaCluster.id;
+          resourceWatchView = 'Workloads';
+          resourceWatchDataKey = key;
+          liveDataStatus = 'live';
+          selectedWorkloadObjectKeys = [resourceObjectSelectionKey(workloadObjects[1])];
+        }
+      }
+    } else {
+      activeView = 'Resources';
+      const selectedKind = scenario === 'secret' ? 'Secret' : 'ConfigMap';
+      selectedResource = qaResources.find((resource) => resource.kind === selectedKind) || null;
+      selectedCategory = 'Configuration';
+      resourceObjects = fixtures.visualQaConfigMaps as ResourceObject[];
+      loadingObjects = false;
+      if (selectedResource) {
+        const key = resourceObjectCacheKey(qaCluster.id, selectedResource, namespace);
+        resourceObjectCache.set(key, resourceObjects);
+        liveDataUpdatedAt.set(key, Date.now());
+        resourceWatchStatus = 'connected';
+        resourceWatchClusterId = qaCluster.id;
+        resourceWatchView = 'Resources';
+        resourceWatchDataKey = key;
+        liveDataStatus = 'live';
+        selectedResourceObjectKeys = [resourceObjectSelectionKey(resourceObjects[1])];
+        if (scenario === 'configuration' || scenario === 'secret') {
+          const values = scenario === 'secret' ? fixtures.visualQaSecretValues : fixtures.visualQaConfigValues;
+          editorResource = selectedResource;
+          editorObject = resourceObjects[0];
+          editorManifest = { apiVersion: selectedResource.apiVersion, kind: selectedResource.kind, metadata: { name: editorObject.name, namespace: editorObject.namespace }, data: values };
+          editorEntries = Object.entries(values).map(([keyName, value]) => ({ key: keyName, value: String(value) }));
+          revealSecret = false;
+          loadingEditor = false;
+        }
+      }
+    }
+    restoringWorkspace = false;
+    return true;
+  }
+
   async function restoreWorkspace() {
+    if (await restoreVisualQaScenario()) return;
     if (!('__TAURI_INTERNALS__' in window)) {
       restoringWorkspace = false;
       return;
@@ -1381,7 +1465,7 @@
     closeLogs();
     closeEditor();
     closeYamlEditor();
-    liveDataStatus = 'unavailable';
+    liveDataStatus = 'loading';
     liveDataStatusMessage = 'Waiting for a fresh live snapshot';
     catalogError = '';
     overviewError = '';
@@ -1707,7 +1791,7 @@
     relatedObject = null;
     activeView = view;
     if (view === 'Workloads' || view === 'Resources') {
-      liveDataStatus = 'unavailable';
+      liveDataStatus = 'loading';
       liveDataStatusMessage = 'Waiting for live data';
     }
     if (view === 'Port forwards') {
@@ -1754,7 +1838,7 @@
     workloadResource = resource;
     const cacheKey = resourceObjectCacheKey(requestClusterId, resource, requestNamespace);
     if (!silent && activeView === 'Workloads') {
-      liveDataStatus = 'unavailable';
+      liveDataStatus = 'loading';
       liveDataStatusMessage = 'Loading live data';
     }
     const cachedObjects = resourceObjectCache.get(cacheKey);
@@ -1864,12 +1948,18 @@
     (focusLast ? options.at(-1) : selected || options[0])?.focus();
   }
 
-  function toggleSidebarTypeMenu(menu: SidebarTypeMenu) {
+  function activateSidebarTypeSection(menu: SidebarTypeMenu) {
     const isOpen = menu === 'workload' ? sidebarWorkloadMenuOpen : sidebarResourceMenuOpen;
-    if (isOpen) {
-      closeSidebarTypeMenus();
+    const targetView: View = menu === 'workload' ? 'Workloads' : 'Resources';
+    if (activeView === targetView) {
+      sidebarWorkloadMenuOpen = menu === 'workload' ? !isOpen : false;
+      sidebarResourceMenuOpen = menu === 'resource' ? !isOpen : false;
       return;
     }
+    void navigateTo(targetView).then(() => {
+      sidebarWorkloadMenuOpen = menu === 'workload';
+      sidebarResourceMenuOpen = menu === 'resource';
+    });
     sidebarWorkloadMenuOpen = menu === 'workload';
     sidebarResourceMenuOpen = menu === 'resource';
     sidebarResourceSearch = '';
@@ -1903,21 +1993,22 @@
   }
 
   async function selectSidebarResourceType(resource: ResourceDescriptor) {
-    closeSidebarTypeMenus();
     selectedCategory = resource.category;
     sidebarResourceCategory = resource.category;
     await navigateTo('Resources');
     await openResource(resource);
+    sidebarResourceMenuOpen = true;
   }
 
   async function selectSidebarWorkloadType(resource: ResourceDescriptor) {
-    closeSidebarTypeMenus();
     if (activeView !== 'Workloads') {
       workloadResource = resource;
       await navigateTo('Workloads');
+      sidebarWorkloadMenuOpen = true;
       return;
     }
     await selectWorkloadResource(resource);
+    sidebarWorkloadMenuOpen = true;
   }
 
   function objectNamespace(object: ResourceObject) {
@@ -1995,7 +2086,11 @@
     return btoa(binary);
   }
 
-  function updateEditorEntry(index: number, value: string) {
+  function updateEditorEntryKey(index: number, key: string) {
+    editorEntries = editorEntries.map((entry, entryIndex) => entryIndex === index ? { ...entry, key } : entry);
+  }
+
+  function updateEditorEntryValue(index: number, value: string) {
     editorEntries = editorEntries.map((entry, entryIndex) => entryIndex === index
       ? { ...entry, value: editorResource?.kind === 'Secret' && revealSecret ? encodeSecret(value) : value }
       : entry,
@@ -2005,12 +2100,10 @@
   function addEditorEntry() {
     const value = editorResource?.kind === 'Secret' && revealSecret ? encodeSecret('') : '';
     editorEntries = [...editorEntries, { key: 'new-key', value }];
-    focusedEditorEntry = editorEntries.length - 1;
   }
 
   function removeEditorEntry(index: number) {
     editorEntries = editorEntries.filter((_, entryIndex) => entryIndex !== index);
-    focusedEditorEntry = Math.max(0, Math.min(focusedEditorEntry, editorEntries.length - 1));
   }
 
   function asRecord(value: unknown): Record<string, unknown> {
@@ -2398,7 +2491,6 @@
     editorObject = object;
     editorManifest = null;
     editorEntries = [];
-    focusedEditorEntry = 0;
     editorCertificate = undefined;
     revealSecret = false;
     loadingEditor = true;
@@ -2435,10 +2527,19 @@
 
   async function saveEditor() {
     if (!editorResource || !editorObject || !editorManifest) return;
+    const normalizedKeys = editorEntries.map((entry) => entry.key.trim());
+    if (normalizedKeys.some((key) => !key)) {
+      notify('Every entry needs a key before saving');
+      return;
+    }
+    if (new Set(normalizedKeys).size !== normalizedKeys.length) {
+      notify('Keys must be unique before saving');
+      return;
+    }
     savingEditor = true;
     try {
       const resourceNamespace = objectNamespace(editorObject);
-      const manifest = { ...editorManifest, data: Object.fromEntries(editorEntries.map((entry) => [entry.key, entry.value])) };
+      const manifest = { ...editorManifest, data: Object.fromEntries(editorEntries.map((entry, index) => [normalizedKeys[index], entry.value])) };
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('save_resource_detail', {
         request: {
@@ -2456,6 +2557,7 @@
       });
       notify(`${editorResource.kind} saved to ${activeCluster}`);
       editorManifest = manifest;
+      editorEntries = editorEntries.map((entry, index) => ({ ...entry, key: normalizedKeys[index] }));
     } catch (error) {
       notify(`Could not save ${editorResource.kind}: ${String(error)}`);
     } finally {
@@ -2629,7 +2731,6 @@
     editorObject = null;
     editorManifest = null;
     editorEntries = [];
-    focusedEditorEntry = 0;
     schedulePendingResumeRecovery();
   }
 
@@ -3232,7 +3333,6 @@
       const target = event.target instanceof Element ? event.target : null;
       if (!target?.closest('.cluster-selector')) clusterPickerOpen = false;
       if (!target?.closest('.namespace-picker')) namespaceOpen = false;
-      if (!target?.closest('.sidebar-workload-menu, .sidebar-resource-menu')) closeSidebarTypeMenus();
       if (!target?.closest('.favorite-context-menu, .favorite-shortcut, .favorite-card-open')) favoriteContextMenu = null;
     };
     const closeFloatingMenusOnEscape = (event: KeyboardEvent) => {
@@ -3311,7 +3411,7 @@
     activeClusterId = cluster.id;
     activeCluster = cluster.name;
     activeKubeconfigPath = cluster.kubeconfigPath;
-    liveDataStatus = 'unavailable';
+    liveDataStatus = 'loading';
     liveDataStatusMessage = 'Waiting for live data';
     resumeRecoveryPending = false;
     resumeRecoveryContext = null;
@@ -3684,7 +3784,7 @@
     }
     selectedResource = resource;
     if (!silent && activeView === 'Resources') {
-      liveDataStatus = 'unavailable';
+      liveDataStatus = 'loading';
       liveDataStatusMessage = 'Loading live data';
     }
     if (!silent) {
@@ -3781,16 +3881,29 @@
       {#each ['Overview', 'Events', 'Workloads', 'Resources', 'CLI', 'Port forwards'] as view}
         {#if view === 'Workloads'}
           <div class:sidebar-type-open={sidebarWorkloadMenuOpen} class="sidebar-type-nav sidebar-workload-menu">
-            <div class="sidebar-type-nav-row"><button class:active={activeView === 'Workloads'} class="nav-item" on:click={() => navigateTo('Workloads')}><span class="nav-icon"><Workflow size={17} strokeWidth={1.8} /></span>Workloads{#if workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}</button><button id="sidebar-workload-type-trigger" class:active={activeView === 'Workloads'} class="sidebar-type-toggle" type="button" aria-label="Choose workload type" aria-haspopup="dialog" aria-expanded={sidebarWorkloadMenuOpen} on:click={() => toggleSidebarTypeMenu('workload')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'workload')}><ChevronDown size={15} /></button></div>
+            <button id="sidebar-workload-type-trigger" class:active={activeView === 'Workloads'} class="nav-item sidebar-accordion-trigger" type="button" aria-expanded={sidebarWorkloadMenuOpen} aria-controls="sidebar-workload-type-options" on:click={() => activateSidebarTypeSection('workload')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'workload')}><span class="nav-icon"><Workflow size={17} strokeWidth={1.8} /></span><span class="sidebar-nav-label">Workloads</span>{#if workloadObjects.length}<span class="count">{workloadObjects.length}</span>{/if}<ChevronDown class="sidebar-accordion-chevron" size={14} /></button>
             {#if sidebarWorkloadMenuOpen}
-              <div class="sidebar-type-flyout sidebar-workload-flyout" role="dialog" aria-label="Choose workload type" tabindex="-1" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'workload')}><div class="sidebar-type-heading"><div><span><Boxes size={17} /></span><div><strong>Workload types</strong><small>{namespace} · loaded on demand</small></div></div><kbd>esc</kbd></div><div id="sidebar-workload-type-options" class="sidebar-type-options" role="listbox" aria-label="Workload types">{#if workloadResources.length}{#each workloadResources as resource}<button type="button" role="option" aria-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} class:sidebar-type-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} on:click={() => selectSidebarWorkloadType(resource)}><span class="sidebar-type-icon"><Boxes size={15} /></span><span><strong>{resource.kind}</strong><small>{resource.apiVersion} · {resource.namespaced ? 'namespaced' : 'cluster-wide'}</small></span><b>{workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}{:else}<div class="sidebar-type-empty"><strong>No workload APIs discovered</strong><small>Select or refresh a cluster first.</small></div>{/if}</div></div>
+              <div class="sidebar-inline-subnav">
+                <div id="sidebar-workload-type-options" class="sidebar-type-options sidebar-inline-options" role="listbox" tabindex="0" aria-label="Workload types" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'workload')}>
+                  {#if workloadResources.length}
+                    {#each workloadResources as resource}<button type="button" role="option" aria-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} class:sidebar-type-selected={workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource)} on:click={() => selectSidebarWorkloadType(resource)}><span class="sidebar-type-icon"><Boxes size={13} /></span><span><strong>{resource.kind}</strong><small>{resource.apiVersion}</small></span><b>{workloadResource !== null && resourceKey(workloadResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}
+                  {:else}<div class="sidebar-type-empty"><strong>No workload APIs discovered</strong><small>Select or refresh a cluster first.</small></div>{/if}
+                </div>
+              </div>
             {/if}
           </div>
         {:else if view === 'Resources'}
           <div class:sidebar-type-open={sidebarResourceMenuOpen} class="sidebar-type-nav sidebar-resource-menu">
-            <div class="sidebar-type-nav-row"><button class:active={activeView === 'Resources'} class="nav-item" on:click={() => navigateTo('Resources')}><span class="nav-icon"><Database size={17} strokeWidth={1.8} /></span>Resources<span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span></button><button id="sidebar-resource-type-trigger" class:active={activeView === 'Resources'} class="sidebar-type-toggle" type="button" aria-label="Choose API resource type" aria-haspopup="dialog" aria-expanded={sidebarResourceMenuOpen} on:click={() => toggleSidebarTypeMenu('resource')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'resource')}><ChevronDown size={15} /></button></div>
+            <button id="sidebar-resource-type-trigger" class:active={activeView === 'Resources'} class="nav-item sidebar-accordion-trigger" type="button" aria-expanded={sidebarResourceMenuOpen} aria-controls="sidebar-resource-type-options" on:click={() => activateSidebarTypeSection('resource')} on:keydown={(event) => handleSidebarTypeTriggerKeydown(event, 'resource')}><span class="nav-icon"><Database size={17} strokeWidth={1.8} /></span><span class="sidebar-nav-label">Resources</span><span class="count">{activeClusterId ? resourceWorkspaceResources.length : 0}</span><ChevronDown class="sidebar-accordion-chevron" size={14} /></button>
             {#if sidebarResourceMenuOpen}
-              <div class="sidebar-type-flyout sidebar-resource-flyout" role="dialog" aria-label="Choose API resource type" tabindex="-1" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'resource')}><div class="sidebar-type-heading"><div><span><Database size={17} /></span><div><strong>API resource types</strong><small>{resourceWorkspaceResources.length} discovered · filter by category</small></div></div><kbd>esc</kbd></div><div class="sidebar-resource-category-tabs" role="tablist" aria-label="Resource categories"><button class:sidebar-resource-category-active={sidebarResourceCategory === 'All resources'} type="button" role="tab" aria-selected={sidebarResourceCategory === 'All resources'} on:click={() => selectSidebarResourceCategory('All resources')}><span>All</span><b>{resourceWorkspaceResources.length}</b></button>{#each resourceCategories as category}<button class:sidebar-resource-category-active={sidebarResourceCategory === category} type="button" role="tab" aria-selected={sidebarResourceCategory === category} on:click={() => selectSidebarResourceCategory(category)}><span>{category === 'Custom Resources' ? 'Custom APIs' : category}</span><b>{categoryCounts[category] || 0}</b></button>{/each}</div><label class="sidebar-type-search"><Search size={15} /><input bind:value={sidebarResourceSearch} placeholder="Search kind, group, or API version" aria-label="Search API resource types" /></label><div id="sidebar-resource-type-options" class="sidebar-type-options" role="listbox" aria-label="API resource types">{#if sidebarVisibleResources.length}{#each sidebarVisibleResources as resource}<button type="button" role="option" aria-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} class:sidebar-type-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} on:click={() => selectSidebarResourceType(resource)}><span class:custom={resource.crd} class="sidebar-type-icon">{resource.crd ? '◇' : '○'}</span><span><strong>{resource.kind}</strong><small>{resource.apiVersion} · {resource.category}</small></span><b>{selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}{:else}<div class="sidebar-type-empty"><strong>No matching API resources</strong><small>Try another type, group, or category.</small></div>{/if}</div></div>
+              <div class="sidebar-inline-subnav sidebar-inline-resource">
+                <div class="sidebar-inline-tools"><select bind:value={sidebarResourceCategory} aria-label="Filter resource category"><option value="All resources">All APIs</option>{#each resourceCategories as category}<option value={category}>{category === 'Custom Resources' ? 'Custom APIs' : category}</option>{/each}</select><label><Search size={13} /><input bind:value={sidebarResourceSearch} placeholder="Filter APIs" aria-label="Filter API resources" /></label></div>
+                <div id="sidebar-resource-type-options" class="sidebar-type-options sidebar-inline-options" role="listbox" tabindex="0" aria-label="API resource types" on:keydown={(event) => handleSidebarTypeMenuKeydown(event, 'resource')}>
+                  {#if sidebarVisibleResources.length}
+                    {#each sidebarVisibleResources as resource}<button type="button" role="option" aria-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} class:sidebar-type-selected={selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource)} on:click={() => selectSidebarResourceType(resource)}><span class:custom={resource.crd} class="sidebar-type-icon">{resource.crd ? '◇' : '○'}</span><span><strong>{resource.kind}</strong><small>{resource.apiVersion}</small></span><b>{selectedResource !== null && resourceKey(selectedResource) === resourceKey(resource) ? '✓' : ''}</b></button>{/each}
+                  {:else}<div class="sidebar-type-empty"><strong>No matching APIs</strong><small>Change the category or filter.</small></div>{/if}
+                </div>
+              </div>
             {/if}
           </div>
         {:else}
@@ -3880,8 +3993,8 @@
     <div class="content">
       <div class:cluster-page-heading={activeView === 'Clusters'} class:resource-page-heading={activeView === 'Resources'} class="page-heading">
         <div>
-          <div class="title-line"><h1>{activeView}</h1>{#if activeClusterId && !catalogError}{#if ['Workloads', 'Resources'].includes(activeView)}<span class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-pill live-status-pill" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><b></b> {liveDataStatusLabel()}</span>{:else}<span class="live-pill"><b></b> Live</span>{/if}{/if}</div>
-          {#if pageContextDescription()}<p>{pageContextDescription()}</p>{/if}
+          <div class="title-line"><h1>{activeView}</h1>{#if activeClusterId && !catalogError}{#if ['Workloads', 'Resources'].includes(activeView)}<span class:live-status-loading={liveDataStatus === 'loading'} class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-pill live-status-pill" title={liveDataStatusTooltip} aria-label={liveDataStatusTooltip} aria-live="polite"><b></b> {liveDataStatusText}</span>{:else}<span class="live-pill"><b></b> Live</span>{/if}{/if}</div>
+          {#if pageContextCopy}<p>{pageContextCopy}</p>{/if}
         </div>
       </div>
 
@@ -4056,7 +4169,7 @@
             <div class="resource-focus-heading">
               {#if selectedResource}
                 <div class="resource-focus-title"><span class:custom={selectedResource.crd}>{selectedResource.crd ? '◇' : '○'}</span><div><p class="eyebrow">Live resource</p><h2>{selectedResource.kind}</h2><p>{selectedResource.apiVersion} · {selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'}</p></div></div>
-                <span class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status resource-live-status" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><i></i>{liveDataStatusLabel()}</span>
+                <span class:live-status-loading={liveDataStatus === 'loading'} class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status resource-live-status" title={liveDataStatusTooltip} aria-label={liveDataStatusTooltip} aria-live="polite"><i></i>{liveDataStatusText}</span>
               {:else}
                 <div class="resource-focus-title"><span>⌁</span><div><p class="eyebrow">Resource workspace</p><h2>Choose a resource</h2><p>Use the Resources menu in the left sidebar to select an API kind.</p></div></div>
               {/if}
@@ -4074,7 +4187,7 @@
               </aside>
               <aside class="resource-inspector" aria-label="Resource details">
                 <div class="resource-inspector-surface">
-                <div class="resource-details-heading resource-pane-heading"><span>02</span><div><strong>Object details</strong><small>Properties, YAML, and actions</small></div></div>
+                {#if !(editorResource && (editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'))}<div class="resource-details-heading resource-pane-heading"><span>02</span><div><strong>Details</strong><small>Live properties and actions</small></div></div>{/if}
                 {#if editorResource && editorObject}
                   <div class="drawer-heading inspector-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Back to resource objects" on:click={() => closeEditor()}>×</button></div>
                   {#if loadingEditor}
@@ -4084,25 +4197,14 @@
                       <section class:expired={editorCertificate.expired} class="certificate-card"><div><span>⌁</span><div><strong>{editorCertificate.expired ? 'Certificate expired' : 'TLS certificate'}</strong><p>Expires {editorCertificate.expiresAt}</p></div></div><b>{certificateRemainingLabel(editorCertificate)}</b></section>
                     {/if}
                     {#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}
-                      <section class="configuration-inspector focus-canvas-editor">
-                        <div class="configuration-data-heading"><div><span>{editorResource.kind === 'Secret' ? '◈' : '◇'}</span><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values loaded from this namespace'}</small></div></div><b>{editorEntries.length} {editorEntries.length === 1 ? 'entry' : 'entries'}</b></div>
-                        <div class="editor-toolbar focus-canvas-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Protecting sensitive values' : 'Focus editor'}</strong><small>{editorResource.kind === 'Secret' ? 'Choose a key on the left, then reveal or edit its value.' : 'Choose a key on the left to give its value room to breathe.'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
-                        <div class="focus-canvas-shell">
-                          {#if editorEntries.length === 0}
-                            <div class="drawer-state focus-canvas-empty">This {editorResource!.kind} has no data entries.<button class="focus-canvas-empty-action" on:click={addEditorEntry}>＋ Add key</button></div>
-                          {:else}
-                            <nav class="focus-canvas-rail" aria-label={`${editorResource.kind} keys`}>
-                              <div class="focus-canvas-rail-heading"><span>Keys</span><b>{editorEntries.length}</b></div>
-                              <div class="focus-canvas-key-list">{#each editorEntries as entry, index}<button type="button" class:focus-canvas-key-active={index === focusedEditorEntry} class="focus-canvas-key" on:click={() => (focusedEditorEntry = index)}><i></i><span>{entry.key || 'Unnamed key'}</span></button>{/each}</div>
-                            </nav>
-                            {#if focusedEditorEntryData}
-                              <div class="focus-canvas-main">
-                                <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea use:autoSizeTextarea={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
-                                <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
-                              </div>
-                            {/if}
-                          {/if}
-                        </div>
+                      <section class="configuration-values-editor">
+                        <header><div><strong>Values</strong><small>{editorEntries.length} {editorEntries.length === 1 ? 'key' : 'keys'}{editorResource.kind === 'Secret' ? (revealSecret ? ' · decoded locally' : ' · base64 encoded') : ''}</small></div><div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? 'Hide decoded' : 'Reveal decoded'}</button>{/if}<button class="configuration-add-key" type="button" on:click={addEditorEntry}>＋ Add key</button></div></header>
+                        {#if editorEntries.length === 0}
+                          <div class="configuration-values-empty">No values yet.<button type="button" on:click={addEditorEntry}>Add the first key</button></div>
+                        {:else}
+                          <div class="configuration-entry-list">{#each editorEntries as entry, index}<article class="configuration-entry"><label><span>Key</span><input value={entry.key} on:input={(event) => updateEditorEntryKey(index, event.currentTarget.value)} spellcheck="false" /></label><label class="configuration-entry-value"><span>Value</span><textarea use:autoSizeTextarea={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntryValue(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button class="configuration-remove-key" type="button" aria-label={`Remove ${entry.key || `entry ${index + 1}`}`} on:click={() => removeEditorEntry(index)}>×</button></article>{/each}</div>
+                        {/if}
+                        <p class="configuration-values-hint">{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded only on this device; saving writes base64 values back to Kubernetes.' : 'Reveal locally when you need to inspect or edit decoded values.') : 'Changes remain local until you save.'}</p>
                       </section>
                     {:else}
                       <div class="inspector-overview">
@@ -4129,7 +4231,7 @@
                       </div>
                     {/if}
                   {/if}
-                  <div class:focus-canvas-footer={editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'} class="drawer-footer"><span>{editorResource.kind === 'Secret' ? 'Decoded values never leave this device.' : 'Loaded directly from the Kubernetes API.'}</span><div class="editor-footer-actions">{#if (editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap') && editorEntries.length}<button type="button" class="focus-canvas-add focus-canvas-add-footer" disabled={loadingEditor || savingEditor} on:click={addEditorEntry}><span>＋</span>Add key</button><button type="button" class="focus-canvas-remove focus-canvas-remove-footer" disabled={loadingEditor || savingEditor} on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove selected</button>{/if}<button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>View YAML</button><button class="destructive" disabled={loadingEditor || savingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button>{#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}<button class="primary" disabled={loadingEditor || savingEditor} on:click={saveEditor}>{savingEditor ? 'Saving…' : 'Save changes'}</button>{/if}</div></div>
+                  <div class="drawer-footer"><span>{editorResource.kind === 'Secret' ? 'Decoded values never leave this device.' : 'Loaded directly from the Kubernetes API.'}</span><div class="editor-footer-actions"><button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>View YAML</button><button class="destructive" disabled={loadingEditor || savingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button>{#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}<button class="primary" disabled={loadingEditor || savingEditor} on:click={saveEditor}>{savingEditor ? 'Saving…' : 'Save changes'}</button>{/if}</div></div>
                 {:else}
                   <div class="inspector-empty"><span>{selectedResource?.crd ? '◇' : '⌁'}</span><h3>{selectedResource ? `Choose a ${selectedResource.kind}` : 'Ready when you are'}</h3><p>{selectedResource ? 'Select an object from the list to view its live properties, edit supported data, or open YAML.' : 'Pick an API type to load its objects. Kuberniva does not fan out requests in the background.'}</p></div>
                 {/if}
@@ -4169,7 +4271,7 @@
         {:else}
           <section class="workloads-page font-sans">
             <div class:workload-detail-open={(editorResource?.category === 'Workloads' && editorObject !== null) || (workloadDetailMode === 'logs' && logTarget !== null)} class:workload-logs-open={workloadDetailMode === 'logs' && logTarget !== null} class="workload-grid grid min-h-[560px]">
-              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><span class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><i></i>{liveDataStatusLabel()}</span><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
+              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><span class:live-status-loading={liveDataStatus === 'loading'} class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status" title={liveDataStatusTooltip} aria-label={liveDataStatusTooltip} aria-live="polite"><i></i>{liveDataStatusText}</span><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
                 {#if loadingWorkloads}
                   <div class="grid min-h-96 place-items-center text-sm text-slate-400"><div class="flex items-center gap-3"><RefreshCw size={18} class="animate-spin text-cyan-300" />Loading {workloadResource?.plural || 'workloads'}…</div></div>
                 {:else if visibleWorkloadObjects.length === 0}
@@ -4408,31 +4510,16 @@
             <section class:expired={editorCertificate.expired} class="certificate-card"><div><span>⌁</span><div><strong>{editorCertificate.expired ? 'Certificate expired' : 'TLS certificate'}</strong><p>Expires {editorCertificate.expiresAt}</p></div></div><b>{certificateRemainingLabel(editorCertificate)}</b></section>
           {/if}
           {#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}
-            <section class="configuration-inspector focus-canvas-editor">
-              <div class="configuration-data-heading"><div><span>{editorResource.kind === 'Secret' ? '◈' : '◇'}</span><div><strong>{editorResource.kind === 'Secret' ? 'Secret data' : 'ConfigMap data'}</strong><small>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded values are visible locally' : 'Values are base64 encoded') : 'Plain-text values'}</small></div></div><b>{editorEntries.length} {editorEntries.length === 1 ? 'entry' : 'entries'}</b></div>
-              <div class="editor-toolbar focus-canvas-toolbar"><div><strong>{editorResource.kind === 'Secret' ? 'Protecting sensitive values' : 'Focus editor'}</strong><small>{editorResource.kind === 'Secret' ? 'Choose a key on the left, then reveal or edit its value.' : 'Choose a key on the left to give its value room to breathe.'}</small></div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? '◉ Hide decoded' : '◌ Reveal decoded'}</button>{/if}</div>
-              <div class="focus-canvas-shell">
-                {#if editorEntries.length === 0}
-                  <div class="drawer-state focus-canvas-empty">This {editorResource!.kind} has no data entries.<button class="focus-canvas-empty-action" on:click={addEditorEntry}>＋ Add key</button></div>
-                {:else}
-                  <nav class="focus-canvas-rail" aria-label={`${editorResource.kind} keys`}>
-                    <div class="focus-canvas-rail-heading"><span>Keys</span><b>{editorEntries.length}</b></div>
-                    <div class="focus-canvas-key-list">{#each editorEntries as entry, index}<button type="button" class:focus-canvas-key-active={index === focusedEditorEntry} class="focus-canvas-key" on:click={() => (focusedEditorEntry = index)}><i></i><span>{entry.key || 'Unnamed key'}</span></button>{/each}</div>
-                  </nav>
-                  {#if focusedEditorEntryData}
-                    <div class="focus-canvas-main">
-                      <label class="focus-canvas-field focus-canvas-value-field"><span>Value</span><textarea use:autoSizeTextarea={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(focusedEditorEntryData.value) : focusedEditorEntryData.value} on:input={(event) => updateEditorEntry(focusedEditorEntry, event.currentTarget.value)} spellcheck="false"></textarea></label>
-                      <div class="focus-canvas-hint"><span>✓</span>{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded locally; saving writes base64 back to Kubernetes.' : 'Values remain encoded until you reveal them.') : 'Changes are staged locally until you save.'}</div>
-                    </div>
-                  {/if}
-                {/if}
-              </div>
+            <section class="configuration-values-editor">
+              <header><div><strong>Values</strong><small>{editorEntries.length} {editorEntries.length === 1 ? 'key' : 'keys'}{editorResource.kind === 'Secret' ? (revealSecret ? ' · decoded locally' : ' · base64 encoded') : ''}</small></div><div>{#if editorResource.kind === 'Secret'}<button class="reveal-button" on:click={() => (revealSecret = !revealSecret)}>{revealSecret ? 'Hide decoded' : 'Reveal decoded'}</button>{/if}<button class="configuration-add-key" type="button" on:click={addEditorEntry}>＋ Add key</button></div></header>
+              {#if editorEntries.length === 0}<div class="configuration-values-empty">No values yet.<button type="button" on:click={addEditorEntry}>Add the first key</button></div>{:else}<div class="configuration-entry-list">{#each editorEntries as entry, index}<article class="configuration-entry"><label><span>Key</span><input value={entry.key} on:input={(event) => updateEditorEntryKey(index, event.currentTarget.value)} spellcheck="false" /></label><label class="configuration-entry-value"><span>Value</span><textarea use:autoSizeTextarea={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} value={editorResource.kind === 'Secret' && revealSecret ? decodeSecret(entry.value) : entry.value} on:input={(event) => updateEditorEntryValue(index, event.currentTarget.value)} spellcheck="false"></textarea></label><button class="configuration-remove-key" type="button" aria-label={`Remove ${entry.key || `entry ${index + 1}`}`} on:click={() => removeEditorEntry(index)}>×</button></article>{/each}</div>{/if}
+              <p class="configuration-values-hint">{editorResource.kind === 'Secret' ? (revealSecret ? 'Decoded only on this device; saving writes base64 values back to Kubernetes.' : 'Reveal locally when you need to inspect or edit decoded values.') : 'Changes remain local until you save.'}</p>
             </section>
           {:else if !editorCertificate}
             <div class="drawer-state">This resource has no editable data view yet.</div>
           {/if}
         {/if}
-        <div class="drawer-footer"><span>{editorResource.kind === 'Secret' ? 'Decoded values are never stored by Kuberniva.' : 'Saving uses the cluster resource version.'}</span><div class="editor-footer-actions">{#if (editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap') && editorEntries.length}<button type="button" class="focus-canvas-add focus-canvas-add-footer" disabled={loadingEditor || savingEditor} on:click={addEditorEntry}><span>＋</span>Add key</button><button type="button" class="focus-canvas-remove focus-canvas-remove-footer" disabled={loadingEditor || savingEditor} on:click={() => removeEditorEntry(focusedEditorEntry)}>Remove selected</button>{/if}<button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>View YAML</button>{#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}<button class="primary" disabled={loadingEditor || savingEditor} on:click={saveEditor}>{savingEditor ? 'Saving…' : 'Save changes'}</button>{:else}<button class="secondary" on:click={() => closeEditor()}>Close</button>{/if}</div></div>
+        <div class="drawer-footer"><span>{editorResource.kind === 'Secret' ? 'Decoded values are never stored by Kuberniva.' : 'Saving uses the cluster resource version.'}</span><div class="editor-footer-actions"><button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>View YAML</button>{#if editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'}<button class="primary" disabled={loadingEditor || savingEditor} on:click={saveEditor}>{savingEditor ? 'Saving…' : 'Save changes'}</button>{:else}<button class="secondary" on:click={() => closeEditor()}>Close</button>{/if}</div></div>
       </div>
     </aside>
   {/if}
