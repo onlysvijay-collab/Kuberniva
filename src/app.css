@@ -5696,3 +5696,122 @@ main.theme-dark .bulk-delete-progress { color: #e1c183; }
     gap: 6px;
   }
 }
+
+/* Loaded is a valid current snapshot even when the optional watch channel is
+   reconnecting or forbidden by RBAC. Keep it visually distinct from stale. */
+.live-status-loaded {
+  color: #2f7180;
+  border-color: #c5e2e7;
+  background: #eef8fa;
+}
+.live-status-loaded b { background: #4a9cab; box-shadow: 0 0 7px rgba(74, 156, 171, .55); }
+.resource-live-status.live-status-loaded > i { background: #4a9cab; box-shadow: 0 0 0 3px rgba(74, 156, 171, .13); }
+main.theme-dark .live-status-loaded {
+  color: #a9dce5;
+  border-color: rgba(95, 178, 193, .45);
+  background: rgba(54, 132, 146, .18);
+}
+main.theme-dark .live-status-loaded b { background: #74c1ce; box-shadow: 0 0 8px rgba(116, 193, 206, .58); }
+main.theme-dark .resource-live-status.live-status-loaded > i { background: #74c1ce; box-shadow: 0 0 0 3px rgba(116, 193, 206, .15); }
+
+/* Theme geometry parity: appearance changes color, never box dimensions. */
+.workload-grid,
+main.theme-dark .workload-grid { gap: 12px; }
+.workload-list-header,
+main.theme-dark .workload-list-header { padding: 16px 20px !important; }
+.workload-list-header h3,
+main.theme-dark .workload-list-header h3 { font-size: 18px; }
+.workload-list-header p,
+main.theme-dark .workload-list-header p { font-size: 12px; }
+.workload-list-header label,
+main.theme-dark .workload-list-header label { height: 40px; }
+.workload-object-list-header,
+main.theme-dark .workload-object-list-header {
+  min-height: 30px;
+  gap: 9px;
+  padding: 6px 9px;
+  font-size: 8px;
+}
+.workload-object-row,
+main.theme-dark .workload-object-row {
+  min-height: 56px;
+  gap: 9px;
+  padding: 7px 9px;
+}
+main.theme-dark .workload-object-name strong { font-size: 12px; }
+main.theme-dark .workload-object-name small { font-size: 9px; }
+main.theme-dark .workload-row-fact b { font-size: 10px; }
+main.theme-dark .workload-row-fact span { font-size: 8px; }
+.workload-inspector-heading,
+main.theme-dark .workload-inspector-heading { padding: 20px 20px 15px; }
+.workload-inspector-heading h3,
+main.theme-dark .workload-inspector-heading h3 { font-size: 19px; }
+.workload-inspector-body,
+main.theme-dark .workload-inspector-body { padding: 14px; }
+.workload-action-grid,
+main.theme-dark .workload-action-grid { gap: 10px; }
+.workload-action-card,
+main.theme-dark .workload-action-card { min-height: 105px; padding: 13px; }
+main.theme-dark .workload-action-card strong { font-size: 13px; }
+main.theme-dark .workload-action-card small { font-size: 11px; }
+main.theme-dark .resource-object-namespace,
+main.theme-dark .resource-object-age { font-size: 9px; }
+main.theme-dark .sidebar-type-options > button strong { font-size: 11.5px; }
+main.theme-dark .sidebar-type-options > button small { font-size: 8.5px; }
+
+/* Workload bulk selection owns its checkbox column; the inner button owns the
+   data columns. This keeps the header and values aligned at every breakpoint. */
+.workload-selection-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) !important;
+  align-items: stretch;
+}
+.workload-selection-header.workload-pod-row {
+  --workload-columns: 28px minmax(140px, 1fr) minmax(64px, .58fr) minmax(76px, .65fr) minmax(64px, .58fr) minmax(78px, .68fr) 58px 18px;
+}
+.workload-selection-header:not(.workload-pod-row) {
+  --workload-columns: 28px minmax(160px, 1fr) minmax(92px, .72fr) 70px 18px;
+}
+.workload-selection-row > .workload-object-row.workload-pod-row {
+  --workload-columns: minmax(140px, 1fr) minmax(64px, .58fr) minmax(76px, .65fr) minmax(64px, .58fr) minmax(78px, .68fr) 58px 18px;
+}
+.workload-selection-row > .workload-object-row:not(.workload-pod-row) {
+  --workload-columns: minmax(160px, 1fr) minmax(92px, .72fr) 70px 18px;
+}
+.workload-selection-row > .resource-object-select { border-radius: 8px 0 0 8px; }
+.workload-selection-row > .workload-object-row { border-radius: 0 8px 8px 0; }
+.workload-bulk-toolbar { margin-inline: 0; }
+
+@media (max-width: 1330px) {
+  .workload-inspector-heading,
+  main.theme-dark .workload-inspector-heading { padding: 17px 16px 13px; }
+  .workload-inspector-body,
+  main.theme-dark .workload-inspector-body { padding: 12px; }
+}
+
+@media (max-width: 1180px) {
+  .workload-object-row,
+  main.theme-dark .workload-object-row { min-height: 54px; gap: 9px; padding-inline: 9px; }
+  .workload-object-list-header,
+  main.theme-dark .workload-object-list-header { gap: 9px; padding-inline: 9px; }
+}
+
+@container workload-list (max-width: 680px) {
+  .workload-selection-header.workload-pod-row {
+    --workload-columns: 28px minmax(108px, 1fr) 58px 62px 52px 64px 46px 16px;
+    min-width: 508px;
+  }
+  .workload-selection-header:not(.workload-pod-row) {
+    --workload-columns: 28px minmax(132px, 1fr) 76px 50px 16px;
+    min-width: 358px;
+  }
+  .workload-selection-row { min-width: 480px; }
+  .workload-selection-row:not(.workload-pod-row) { min-width: 358px; }
+  .workload-selection-row > .workload-object-row.workload-pod-row {
+    --workload-columns: minmax(108px, 1fr) 58px 62px 52px 64px 46px 16px;
+  }
+  .workload-selection-row > .workload-object-row:not(.workload-pod-row) {
+    --workload-columns: minmax(132px, 1fr) 76px 50px 16px;
+  }
+}

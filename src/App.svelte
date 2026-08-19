@@ -12,6 +12,8 @@
   type ResourceObject = {
     name: string;
     namespace?: string;
+    uid?: string;
+    resourceVersion?: string;
     createdAt?: string;
     status?: string;
     readyContainers?: number;
@@ -49,13 +51,13 @@
   type KubeCliResponse = { stdout: string; stderr: string; exitCode?: number; success: boolean };
   type ResourceWatchSignal = { watchId: string; action: string; error?: string };
   type ResourceWatchStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
-  type LiveDataStatus = 'live' | 'stale' | 'paused' | 'unavailable';
+  type LiveDataStatus = 'live' | 'loaded' | 'stale' | 'paused' | 'unavailable';
   type LiveRefreshContext = { clusterId: string; view: View; dataKey: string };
   type ClusterSession = { namespace: string; selectedCategory: ResourceCategory | 'All resources'; resourceSearch: string; workloadResource: ResourceDescriptor | null; workloadObjects: ResourceObject[]; workloadSearch: string; clusterOverview: ClusterOverview | null };
   type PersistedWorkspace = { version: 7; sourceConfigured: boolean; kubeconfigPath: string; kubeconfigPaths: string[]; clusters: Cluster[]; sidebarWidth?: number; sidebarHidden?: boolean; clusterNamespaces?: Record<string, string>; favoriteClusterIds?: string[]; favoriteClusterNames?: Record<string, string>; portForwards?: SavedPortForward[]; theme?: ThemeMode };
   type DeletionTarget =
-    | { type: 'resource'; resource: ResourceDescriptor; object: ResourceObject }
-    | { type: 'bulk-resource'; resource: ResourceDescriptor; objects: ResourceObject[]; namespaceScope: string }
+    | { type: 'resource'; resource: ResourceDescriptor; object: ResourceObject; clusterId: string; cluster: string; kubeconfigPath?: string; namespaceScope: string; view: 'Resources' | 'Workloads' }
+    | { type: 'bulk-resource'; resource: ResourceDescriptor; objects: ResourceObject[]; namespaceScope: string; clusterId: string; cluster: string; kubeconfigPath?: string; view: 'Resources' | 'Workloads' }
     | { type: 'cluster'; cluster: Cluster };
 
   let activeView: View = 'Overview';
@@ -88,6 +90,10 @@
   let selectedResourceObjects: ResourceObject[] = [];
   let allResourceObjectsSelected = false;
   let resourceObjectsSelectionPartial = false;
+  let selectedWorkloadObjectKeys: string[] = [];
+  let selectedWorkloadObjects: ResourceObject[] = [];
+  let allWorkloadObjectsSelected = false;
+  let workloadObjectsSelectionPartial = false;
   let loadingObjects = false;
   let resourceRequestGeneration = 0;
   let relatedPods: ResourceObject[] | null = null;
@@ -180,6 +186,9 @@
   let overviewRefreshTimer: ReturnType<typeof window.setInterval> | undefined;
   let resourceWatchId = '';
   let resourceWatchKey = '';
+  let resourceWatchClusterId = '';
+  let resourceWatchView: 'Resources' | 'Workloads' | '' = '';
+  let resourceWatchDataKey = '';
   let resourceWatchGeneration = 0;
   let resourceWatchRefreshTimer: ReturnType<typeof window.setTimeout> | undefined;
   let resourceWatchRefreshPending = false;
@@ -205,9 +214,11 @@
   let savingYaml = false;
   let deletionTarget: DeletionTarget | null = null;
   let deletionStep: 1 | 2 = 1;
-  let deletionName = '';
   let deletingResource = false;
   let bulkDeleteProgress: { completed: number; total: number; failed: number } | null = null;
+  let deletionDialog: HTMLDivElement;
+  let deletionConfirmButton: HTMLButtonElement;
+  let deletionReturnFocus: HTMLElement | null = null;
   let desktopWindow: TauriWindow | null = null;
   let windowControlsAvailable = false;
   let isWindowMaximized = false;
@@ -248,6 +259,9 @@
   $: selectedResourceObjects = resourceObjects.filter((object) => selectedResourceObjectKeys.includes(resourceObjectSelectionKey(object)));
   $: allResourceObjectsSelected = resourceObjects.length > 0 && selectedResourceObjects.length === resourceObjects.length;
   $: resourceObjectsSelectionPartial = selectedResourceObjects.length > 0 && !allResourceObjectsSelected;
+  $: selectedWorkloadObjects = workloadObjects.filter((object) => selectedWorkloadObjectKeys.includes(resourceObjectSelectionKey(object)));
+  $: allWorkloadObjectsSelected = workloadObjects.length > 0 && selectedWorkloadObjects.length === workloadObjects.length;
+  $: workloadObjectsSelectionPartial = selectedWorkloadObjects.length > 0 && !allWorkloadObjectsSelected;
   $: categoryCounts = Object.fromEntries(resourceCategories.map((category) => [category, resourceWorkspaceResources.filter((resource) => resource.category === category).length]));
   $: showClusterWorkspaceControls = Boolean(activeClusterId) && ['Overview', 'Events', 'Resources', 'Workloads', 'Logs', 'CLI'].includes(activeView);
   $: refreshingCurrentView = refreshingCluster || loadingCatalog || (activeView === 'Overview'
@@ -561,6 +575,25 @@
     clusters = [...retainedClusters, ...mergedIncoming];
     connectedKubeconfig = clusters.length > 0;
     if (!clusters.some((cluster) => cluster.id === activeClusterId)) {
+      resourceRequestGeneration += 1;
+      workloadRequestGeneration += 1;
+      overviewRequestGeneration += 1;
+      eventsRequestGeneration += 1;
+      loadingOverview = false;
+      loadingEvents = false;
+      loadingObjects = false;
+      loadingWorkloads = false;
+      stopLiveObjectRefresh();
+      clearLiveDataFreshness();
+      clearResourceObjectSelection();
+      resourceObjects = [];
+      workloadObjects = [];
+      relatedPods = null;
+      relatedObject = null;
+      selectedResource = null;
+      closeLogs();
+      closeEditor();
+      closeYamlEditor();
       activeClusterId = '';
       activeKubeconfigPath = undefined;
       activeCluster = clusters.length ? 'Select a cluster' : 'No cluster connected';
@@ -573,12 +606,33 @@
     return [clusterId, resource.group, resource.version, resource.plural, resourceNamespace || 'all namespaces'].join('\u0000');
   }
 
+  function clearLiveDataFreshness(clusterId?: string, resource?: ResourceDescriptor, resourceNamespace = namespace) {
+    if (!clusterId) {
+      liveDataUpdatedAt.clear();
+      return;
+    }
+    if (resource) {
+      liveDataUpdatedAt.delete(resourceObjectCacheKey(clusterId, resource, resourceNamespace));
+      return;
+    }
+    for (const key of liveDataUpdatedAt.keys()) {
+      if (key.startsWith(`${clusterId}\u0000`)) liveDataUpdatedAt.delete(key);
+    }
+  }
+
+  function clearResourceObjectCacheEntry(clusterId: string, resource: ResourceDescriptor, resourceNamespace: string) {
+    const key = resourceObjectCacheKey(clusterId, resource, resourceNamespace);
+    resourceObjectCache.delete(key);
+    clearLiveDataFreshness(clusterId, resource, resourceNamespace);
+  }
+
   function resourceObjectSelectionKey(object: ResourceObject) {
-    return `${object.namespace || ''}\u0000${object.name}`;
+    return `${object.namespace || ''}\u0000${object.name}\u0000${object.uid || ''}`;
   }
 
   function clearResourceObjectSelection() {
     selectedResourceObjectKeys = [];
+    selectedWorkloadObjectKeys = [];
   }
 
   function reconcileResourceObjectSelection(objects: ResourceObject[]) {
@@ -603,6 +657,32 @@
       : resourceObjects.map(resourceObjectSelectionKey);
   }
 
+  function clearWorkloadObjectSelection() {
+    selectedWorkloadObjectKeys = [];
+  }
+
+  function reconcileWorkloadObjectSelection(objects: ResourceObject[]) {
+    const available = new Set(objects.map(resourceObjectSelectionKey));
+    selectedWorkloadObjectKeys = selectedWorkloadObjectKeys.filter((key) => available.has(key));
+  }
+
+  function toggleWorkloadObjectSelection(object: ResourceObject) {
+    const key = resourceObjectSelectionKey(object);
+    selectedWorkloadObjectKeys = selectedWorkloadObjectKeys.includes(key)
+      ? selectedWorkloadObjectKeys.filter((candidate) => candidate !== key)
+      : [...selectedWorkloadObjectKeys, key];
+  }
+
+  function isWorkloadObjectSelected(object: ResourceObject) {
+    return selectedWorkloadObjectKeys.includes(resourceObjectSelectionKey(object));
+  }
+
+  function toggleAllWorkloadObjects() {
+    selectedWorkloadObjectKeys = allWorkloadObjectsSelected
+      ? []
+      : workloadObjects.map(resourceObjectSelectionKey);
+  }
+
   function activeLiveDataKey() {
     if (!activeClusterId) return '';
     if (activeView === 'Workloads' && workloadResource) {
@@ -618,6 +698,25 @@
     const dataKey = activeLiveDataKey();
     if (!activeClusterId || !dataKey || !['Workloads', 'Resources'].includes(activeView)) return null;
     return { clusterId: activeClusterId, view: activeView, dataKey };
+  }
+
+  function liveRefreshContext(clusterId: string, view: 'Resources' | 'Workloads', resource: ResourceDescriptor, resourceNamespace: string): LiveRefreshContext {
+    return { clusterId, view, dataKey: resourceObjectCacheKey(clusterId, resource, resourceNamespace) };
+  }
+
+  function liveRefreshContextMatchesCurrent(context: LiveRefreshContext) {
+    const current = currentLiveRefreshContext();
+    return Boolean(current
+      && current.clusterId === context.clusterId
+      && current.view === context.view
+      && current.dataKey === context.dataKey);
+  }
+
+  function liveWatchMatchesContext(context: LiveRefreshContext) {
+    return resourceWatchStatus === 'connected'
+      && resourceWatchClusterId === context.clusterId
+      && resourceWatchView === context.view
+      && resourceWatchDataKey === context.dataKey;
   }
 
   function markResumeRecoveryPending() {
@@ -649,16 +748,23 @@
     resumeRecoveryTimer = undefined;
   }
 
-  function markLiveDataAvailable(resource: ResourceDescriptor, clusterId = activeClusterId, resourceNamespace = namespace) {
+  function markLiveDataAvailable(resource: ResourceDescriptor, clusterId: string, resourceNamespace: string, view: 'Resources' | 'Workloads') {
     if (!clusterId) return;
-    liveDataUpdatedAt.set(resourceObjectCacheKey(clusterId, resource, resourceNamespace), Date.now());
-    if (activeLiveDataKey() === resourceObjectCacheKey(clusterId, resource, resourceNamespace)) {
-      liveDataStatus = 'live';
-      liveDataStatusMessage = '';
+    const context = liveRefreshContext(clusterId, view, resource, resourceNamespace);
+    liveDataUpdatedAt.set(context.dataKey, Date.now());
+    if (liveRefreshContextMatchesCurrent(context)) {
+      liveDataStatus = liveWatchMatchesContext(context) ? 'live' : 'loaded';
+      liveDataStatusMessage = liveWatchMatchesContext(context) ? '' : 'Current API snapshot loaded; live watch is not connected.';
     }
   }
 
-  function markLiveDataUnavailable(message = 'Live data is unavailable') {
+  function markLiveDataUnavailable(message = 'Live data is unavailable', context?: LiveRefreshContext) {
+    if (context && !liveRefreshContextMatchesCurrent(context)) return;
+    if (liveDataUpdatedAt.has(activeLiveDataKey())) {
+      liveDataStatus = 'loaded';
+      liveDataStatusMessage = `Current API snapshot loaded; ${message.toLowerCase()}.`;
+      return;
+    }
     liveDataStatus = 'unavailable';
     liveDataStatusMessage = message;
   }
@@ -676,6 +782,7 @@
   function liveDataStatusLabel() {
     if (liveDataStatus === 'paused') return 'Paused';
     if (liveDataStatus === 'stale') return 'Stale';
+    if (liveDataStatus === 'loaded') return 'Loaded';
     if (liveDataStatus === 'unavailable') return 'Unavailable';
     return 'Live';
   }
@@ -683,22 +790,25 @@
   function liveDataStatusTitle() {
     if (liveDataStatusMessage) return liveDataStatusMessage;
     if (liveDataStatus === 'live') return 'Live updates are current';
+    if (liveDataStatus === 'loaded') return 'The current API snapshot is loaded; live updates are not connected.';
     return 'Live updates will resume when data is available and no active workflow is open';
   }
 
   function pageContextDescription() {
-    if (!activeClusterId) return connectedKubeconfig ? 'Choose a cluster from the sidebar to connect.' : 'Connect a kubeconfig to begin.';
-    if (!['Workloads', 'Resources'].includes(activeView)) return `Browsing ${activeCluster} in real time.`;
+    if (!activeClusterId) return connectedKubeconfig ? 'Choose a cluster from the sidebar to connect.' : '';
+    if (!['Workloads', 'Resources'].includes(activeView)) return '';
     if (liveDataStatus === 'paused') return 'Live refresh is paused while your current workflow stays open.';
     if (liveDataStatus === 'stale') return 'Live data is stale. Refresh when you are ready.';
+    if (liveDataStatus === 'loaded') return 'Current API snapshot loaded; live updates are unavailable. Refresh when needed.';
     if (liveDataStatus === 'unavailable') return 'Live data is unavailable. Kuberniva will preserve this workspace until it can refresh safely.';
-    return `Browsing ${activeCluster} in real time.`;
+    return '';
   }
 
   function activeLiveDataNeedsRecovery() {
     const key = activeLiveDataKey();
     if (!key) return false;
-    if (resourceWatchStatus === 'connected') return false;
+    const currentContext = currentLiveRefreshContext();
+    if (currentContext && liveWatchMatchesContext(currentContext)) return false;
     const lastUpdatedAt = liveDataUpdatedAt.get(key) || 0;
     const stale = !lastUpdatedAt || Date.now() - lastUpdatedAt >= liveDataStaleAfterMs;
     const unavailable = Boolean(catalogError) || resourceWatchStatus === 'error' || resourceWatchStatus === 'reconnecting'
@@ -793,12 +903,17 @@
     workloadObjects = session?.workloadObjects || [];
     workloadSearch = session?.workloadSearch || '';
     clusterOverview = session?.clusterOverview || null;
+    if (session?.workloadResource && session.workloadObjects.length) {
+      liveDataUpdatedAt.set(resourceObjectCacheKey(cluster.id, session.workloadResource, namespace), Date.now());
+    }
+    reconcileWorkloadObjectSelection(workloadObjects);
   }
 
   function clearClusterObjectCache(clusterId: string) {
     for (const cacheKey of resourceObjectCache.keys()) {
       if (cacheKey.startsWith(`${clusterId}\u0000`)) resourceObjectCache.delete(cacheKey);
     }
+    clearLiveDataFreshness(clusterId);
   }
 
   async function restoreWorkspace() {
@@ -870,6 +985,9 @@
     const watchId = resourceWatchId;
     resourceWatchId = '';
     resourceWatchKey = '';
+    resourceWatchClusterId = '';
+    resourceWatchView = '';
+    resourceWatchDataKey = '';
     resourceWatchErrorNotified = false;
     resourceWatchStatus = 'idle';
     resourceWatchSignalBuffer.clear();
@@ -909,6 +1027,8 @@
     if (resourceWatchId && resourceWatchKey === nextWatchKey) return;
     if (resourceWatchId) stopLiveObjectRefresh();
     const watchGeneration = resourceWatchGeneration;
+    const requestView = resource.category === 'Workloads' ? 'Workloads' : 'Resources';
+    const requestContext = liveRefreshContext(requestClusterId, requestView, resource, requestNamespace);
     resourceWatchStatus = 'connecting';
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -929,13 +1049,17 @@
       }
       resourceWatchId = watchId;
       resourceWatchKey = nextWatchKey;
+      resourceWatchClusterId = requestClusterId;
+      resourceWatchView = requestView;
+      resourceWatchDataKey = resourceObjectCacheKey(requestClusterId, resource, requestNamespace);
       resourceWatchErrorNotified = false;
       const bufferedSignal = resourceWatchSignalBuffer.get(watchId);
       resourceWatchSignalBuffer.delete(watchId);
       if (bufferedSignal) scheduleResourceWatchRefresh(bufferedSignal);
     } catch (error) {
+      if (!liveRefreshContextMatchesCurrent(requestContext)) return;
       resourceWatchStatus = 'error';
-      markLiveDataUnavailable(`Live updates unavailable for ${resource.kind}`);
+      markLiveDataUnavailable(`Live updates unavailable for ${resource.kind}`, requestContext);
       // A resource can be listable without watch permission. Keep the current
       // list usable and surface the limitation once instead of retrying loudly.
       if (!resourceWatchErrorNotified) {
@@ -946,11 +1070,17 @@
   }
 
   function scheduleResourceWatchRefresh(signal: ResourceWatchSignal) {
-    if (signal.watchId !== resourceWatchId) return;
+    if (
+      signal.watchId !== resourceWatchId
+      || !resourceWatchClusterId
+      || resourceWatchClusterId !== activeClusterId
+      || resourceWatchView !== activeView
+      || resourceWatchDataKey !== activeLiveDataKey()
+    ) return;
     if (signal.action === 'connected') {
       resourceWatchStatus = 'connected';
       resourceWatchErrorNotified = false;
-      if (activeLiveDataKey()) {
+      if (resourceWatchDataKey && liveDataUpdatedAt.has(resourceWatchDataKey)) {
         liveDataStatus = 'live';
         liveDataStatusMessage = '';
       }
@@ -959,7 +1089,11 @@
     if (signal.error && !resourceWatchErrorNotified) {
       resourceWatchErrorNotified = true;
       resourceWatchStatus = 'reconnecting';
-      markLiveDataUnavailable('Live updates paused; refresh is available');
+      markLiveDataUnavailable('Live updates paused; refresh is available', {
+        clusterId: resourceWatchClusterId,
+        view: resourceWatchView,
+        dataKey: resourceWatchDataKey,
+      });
       notify(`Live updates paused: ${signal.error}`);
     }
     if (signal.error) resourceWatchStatus = 'reconnecting';
@@ -1184,6 +1318,8 @@
     cancelPendingLiveRefresh();
     clearResourceObjectSelection();
     const resourceToReload = selectedResource;
+    if (activeClusterId && resourceToReload) clearLiveDataFreshness(activeClusterId, resourceToReload, namespace);
+    if (activeClusterId && workloadResource) clearLiveDataFreshness(activeClusterId, workloadResource, namespace);
     namespace = nextNamespace;
     namespaceOpen = false;
     clusterPickerOpen = false;
@@ -1206,6 +1342,7 @@
   function selectResourceCategory(category: ResourceCategory | 'All resources') {
     cancelPendingLiveRefresh();
     clearResourceObjectSelection();
+    if (activeClusterId && selectedResource) clearLiveDataFreshness(activeClusterId, selectedResource, namespace);
     selectedCategory = category;
     sidebarResourceCategory = category;
     resourceSearch = '';
@@ -1232,8 +1369,20 @@
     loadingEvents = false;
     stopLiveObjectRefresh();
     clearResourceObjectSelection();
+    loadingObjects = false;
+    loadingWorkloads = false;
     clearClusterObjectCache(requestClusterId);
     catalogCache.delete(requestClusterId);
+    resourceObjects = [];
+    workloadObjects = [];
+    relatedPods = null;
+    relatedObject = null;
+    selectedResource = null;
+    closeLogs();
+    closeEditor();
+    closeYamlEditor();
+    liveDataStatus = 'unavailable';
+    liveDataStatusMessage = 'Waiting for a fresh live snapshot';
     catalogError = '';
     overviewError = '';
     eventsError = '';
@@ -1277,12 +1426,13 @@
     }
     const requestClusterId = cluster.id;
     const requestView = activeView;
+    const requestNamespace = namespace;
     const previousWorkloadResource = workloadResource;
     const previousSelectedResource = selectedResource;
     refreshingCluster = true;
     try {
       if (!await refreshClusterConnection(cluster)) return;
-      if (requestClusterId !== activeClusterId || requestView !== activeView) return;
+      if (requestClusterId !== activeClusterId || requestView !== activeView || requestNamespace !== namespace) return;
       if (requestView === 'Overview') {
         await loadClusterOverview(true);
         startOverviewRefresh();
@@ -1297,7 +1447,7 @@
           || catalog.resources.find((candidate) => candidate.kind === 'Deployment')
           || catalog.resources.find((candidate) => candidate.category === 'Workloads');
         if (!resource) return;
-        resourceObjectCache.delete(resourceObjectCacheKey(requestClusterId, resource, namespace));
+        clearResourceObjectCacheEntry(requestClusterId, resource, namespace);
         await loadWorkloadResource(resource);
         startLiveObjectRefresh();
         return;
@@ -1311,7 +1461,7 @@
           return;
         }
         selectedResource = resource;
-        resourceObjectCache.delete(resourceObjectCacheKey(requestClusterId, resource, namespace));
+        clearResourceObjectCacheEntry(requestClusterId, resource, namespace);
         await openResource(resource);
         return;
       }
@@ -1321,7 +1471,10 @@
         await loadLogs(true);
       }
     } catch (error) {
-      if (['Workloads', 'Resources'].includes(requestView)) markLiveDataUnavailable('Could not refresh live data');
+      const failedResource = requestView === 'Workloads' ? previousWorkloadResource : previousSelectedResource;
+      if (requestClusterId === activeClusterId && requestView === activeView && requestNamespace === namespace && failedResource && (requestView === 'Resources' || requestView === 'Workloads')) {
+        markLiveDataUnavailable('Could not refresh live data', liveRefreshContext(requestClusterId, requestView, failedResource, requestNamespace));
+      }
       notify(`Refresh failed for ${cluster.name}: ${String(error)}`);
     } finally {
       refreshingCluster = false;
@@ -1346,13 +1499,13 @@
     }
     if (activeView === 'Workloads' && workloadResource) {
       const resource = workloadResource;
-      resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
+      clearResourceObjectCacheEntry(activeClusterId, resource, namespace);
       await loadWorkloadResource(resource, true);
       return;
     }
     if (activeView === 'Resources' && selectedResource) {
       const resource = selectedResource;
-      resourceObjectCache.delete(resourceObjectCacheKey(activeClusterId, resource, namespace));
+      clearResourceObjectCacheEntry(activeClusterId, resource, namespace);
       await openResource(resource, { silent: true });
     }
   }
@@ -1596,6 +1749,7 @@
     const requestGeneration = ++workloadRequestGeneration;
     const requestClusterId = activeClusterId;
     const requestNamespace = namespace;
+    const requestView = activeView;
     const requestResourceKey = resourceKey(resource);
     workloadResource = resource;
     const cacheKey = resourceObjectCacheKey(requestClusterId, resource, requestNamespace);
@@ -1606,11 +1760,9 @@
     const cachedObjects = resourceObjectCache.get(cacheKey);
     if (cachedObjects) {
       workloadObjects = cachedObjects;
+      reconcileWorkloadObjectSelection(cachedObjects);
       loadingWorkloads = false;
-      if (liveDataUpdatedAt.has(cacheKey) && activeLiveDataKey() === cacheKey) {
-        liveDataStatus = 'live';
-        liveDataStatusMessage = '';
-      }
+      if (requestView === 'Workloads') markLiveDataAvailable(resource, requestClusterId, requestNamespace, 'Workloads');
       return;
     }
     if (!silent) workloadObjects = [];
@@ -1632,11 +1784,13 @@
       if (requestGeneration !== workloadRequestGeneration
         || requestClusterId !== activeClusterId
         || requestNamespace !== namespace
+        || requestView !== activeView
         || !workloadResource
         || resourceKey(workloadResource) !== requestResourceKey) return;
       workloadObjects = response;
       resourceObjectCache.set(cacheKey, response);
-      markLiveDataAvailable(resource, requestClusterId, requestNamespace);
+      reconcileWorkloadObjectSelection(response);
+      markLiveDataAvailable(resource, requestClusterId, requestNamespace, 'Workloads');
       if (
         editorResource
         && editorObject
@@ -1654,19 +1808,22 @@
         }
       }
     } catch (error) {
-      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId) {
-        markLiveDataUnavailable(`Could not load ${resource.kind}`);
+      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId && requestView === activeView) {
+        markLiveDataUnavailable(`Could not load ${resource.kind}`, liveRefreshContext(requestClusterId, 'Workloads', resource, requestNamespace));
         notify(`Could not load ${resource.kind}s: ${String(error)}`);
       }
     } finally {
-      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId && !silent) loadingWorkloads = false;
-      flushPendingResourceWatchRefresh();
+      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId && requestView === activeView && !silent) loadingWorkloads = false;
+      if (requestGeneration === workloadRequestGeneration && requestClusterId === activeClusterId && requestNamespace === namespace && requestView === activeView && workloadResource && resourceKey(workloadResource) === requestResourceKey) {
+        flushPendingResourceWatchRefresh();
+      }
     }
   }
 
   async function selectWorkloadResource(resource: ResourceDescriptor) {
     cancelPendingLiveRefresh();
     clearResourceObjectSelection();
+    if (activeClusterId && workloadResource) clearLiveDataFreshness(activeClusterId, workloadResource, namespace);
     workloadSearch = '';
     // A resource-type switch starts a fresh workload workspace. Do not leave a
     // Pod/deployment inspector, terminal, or log stream attached to the
@@ -2307,51 +2464,77 @@
     }
   }
 
-  async function invokeDeleteResourceObject(resource: ResourceDescriptor, object: ResourceObject) {
-    const resourceNamespace = objectNamespace(object);
-    if (resource.namespaced && !resourceNamespace) {
+  async function invokeDeleteResourceObject(target: ResourceDeletionTarget, object: ResourceObject) {
+    const resourceNamespace = object.namespace || (target.namespaceScope === 'all namespaces' ? '' : target.namespaceScope);
+    if (target.resource.namespaced && !resourceNamespace) {
       throw new Error('A namespace is required to delete this resource');
     }
     const { invoke } = await import('@tauri-apps/api/core');
     await invoke('delete_resource_object', {
       request: {
-        kubeconfigPath: activeKubeconfigPath || kubeconfigPath || null,
-        context: activeCluster,
-        group: resource.group,
-        version: resource.version,
-        kind: resource.kind,
-        plural: resource.plural,
-        namespaced: resource.namespaced,
+        kubeconfigPath: target.kubeconfigPath || null,
+        context: target.cluster,
+        group: target.resource.group,
+        version: target.resource.version,
+        kind: target.resource.kind,
+        plural: target.resource.plural,
+        namespaced: target.resource.namespaced,
         namespace: resourceNamespace || null,
         name: object.name,
+        uid: object.uid || null,
+        // UID prevents a same-name replacement from being deleted after review.
+        // Resource versions change frequently for live workloads, so they are
+        // intentionally not used as a destructive precondition.
+        resourceVersion: null,
       },
     });
   }
 
-  async function deleteResourceObject(resource: ResourceDescriptor, object: ResourceObject) {
-    if (resource.namespaced && !objectNamespace(object)) {
-      notify('A namespace is required to delete this resource');
+  type ResourceDeletionTarget = Extract<DeletionTarget, { type: 'resource' }> | Extract<DeletionTarget, { type: 'bulk-resource' }>;
+
+  function deletionTargetContextMatches(target: ResourceDeletionTarget) {
+    const currentResource = target.view === 'Resources' ? selectedResource : workloadResource;
+    const currentKubeconfigPath = activeKubeconfigPath || kubeconfigPath || undefined;
+    return activeClusterId === target.clusterId
+      && activeCluster === target.cluster
+      && currentKubeconfigPath === target.kubeconfigPath
+      && activeView === target.view
+      && namespace === target.namespaceScope
+      && Boolean(currentResource && resourceKey(currentResource) === resourceKey(target.resource));
+  }
+
+  async function deleteResourceTarget(target: Extract<DeletionTarget, { type: 'resource' }>) {
+    if (!deletionTargetContextMatches(target)) {
+      notify('Deletion canceled because the active cluster, namespace, or resource changed.');
       return;
     }
     deletingResource = true;
     try {
-      await invokeDeleteResourceObject(resource, object);
-      clearClusterObjectCache(activeClusterId);
-      resourceObjects = resourceObjects.filter((candidate) => candidate.name !== object.name || candidate.namespace !== object.namespace);
-      selectedResourceObjectKeys = selectedResourceObjectKeys.filter((key) => key !== resourceObjectSelectionKey(object));
-      if (workloadResource && resourceKey(workloadResource) === resourceKey(resource)) {
-        workloadObjects = workloadObjects.filter((candidate) => candidate.name !== object.name || candidate.namespace !== object.namespace);
+      await invokeDeleteResourceObject(target, target.object);
+      if (!deletionTargetContextMatches(target)) {
+        notify('Deletion completed, but the workspace changed before its list could be updated. Refresh the current view to verify.');
+        return;
       }
+      clearClusterObjectCache(target.clusterId);
+      if (target.view === 'Resources' && selectedResource && resourceKey(selectedResource) === resourceKey(target.resource)) {
+        resourceObjects = resourceObjects.filter((candidate) => resourceObjectSelectionKey(candidate) !== resourceObjectSelectionKey(target.object));
+        selectedResourceObjectKeys = selectedResourceObjectKeys.filter((key) => key !== resourceObjectSelectionKey(target.object));
+      }
+      if (target.view === 'Workloads' && workloadResource && resourceKey(workloadResource) === resourceKey(target.resource)) {
+        workloadObjects = workloadObjects.filter((candidate) => resourceObjectSelectionKey(candidate) !== resourceObjectSelectionKey(target.object));
+        selectedWorkloadObjectKeys = selectedWorkloadObjectKeys.filter((key) => key !== resourceObjectSelectionKey(target.object));
+      }
+      markResourceWatchRefreshPending();
       closeEditor();
       closeYamlEditor();
-      notify(`${resource.kind} ${object.name} was deleted from ${activeCluster}`);
+      notify(`${target.resource.kind} ${target.object.name} was deleted from ${target.cluster}`);
     } catch (error) {
-      notify(`Could not delete ${resource.kind} ${object.name}: ${String(error)}`);
+      notify(`Could not delete ${target.resource.kind} ${target.object.name}: ${String(error)}`);
     } finally {
       deletingResource = false;
       deletionTarget = null;
       deletionStep = 1;
-      deletionName = '';
+      restoreDeletionFocus();
       schedulePendingResumeRecovery();
     }
   }
@@ -2361,24 +2544,37 @@
     bulkDeleteProgress = { completed: 0, total: target.objects.length, failed: 0 };
     const failed: Array<{ object: ResourceObject; error: string }> = [];
     const successfulKeys = new Set<string>();
+    let successfulCount = 0;
     let completed = 0;
     try {
       for (const object of target.objects) {
-        try {
-          await invokeDeleteResourceObject(target.resource, object);
-          successfulKeys.add(resourceObjectSelectionKey(object));
-        } catch (error) {
-          failed.push({ object, error: String(error) });
+        if (!deletionTargetContextMatches(target)) {
+          failed.push({ object, error: 'Workspace context changed before this object was deleted' });
+        } else {
+          try {
+            await invokeDeleteResourceObject(target, object);
+            successfulKeys.add(resourceObjectSelectionKey(object));
+            successfulCount += 1;
+          } catch (error) {
+            failed.push({ object, error: String(error) });
+          }
         }
         completed += 1;
         bulkDeleteProgress = { completed, total: target.objects.length, failed: failed.length };
       }
-      if (successfulKeys.size) {
-        clearClusterObjectCache(activeClusterId);
-        resourceObjects = resourceObjects.filter((object) => !successfulKeys.has(resourceObjectSelectionKey(object)));
-        selectedResourceObjectKeys = selectedResourceObjectKeys.filter((key) => !successfulKeys.has(key));
-        if (workloadResource && resourceKey(workloadResource) === resourceKey(target.resource)) {
+      const targetContextStillCurrent = deletionTargetContextMatches(target);
+      if (targetContextStillCurrent) markResourceWatchRefreshPending();
+      if (successfulCount && targetContextStillCurrent) {
+        clearClusterObjectCache(target.clusterId);
+        if (target.view === 'Resources' && selectedResource && resourceKey(selectedResource) === resourceKey(target.resource)) {
+          resourceObjects = resourceObjects.filter((object) => !successfulKeys.has(resourceObjectSelectionKey(object)));
+          selectedResourceObjectKeys = selectedResourceObjectKeys.filter((key) => !successfulKeys.has(key));
+          reconcileResourceObjectSelection(resourceObjects);
+        }
+        if (target.view === 'Workloads' && workloadResource && resourceKey(workloadResource) === resourceKey(target.resource)) {
           workloadObjects = workloadObjects.filter((object) => !successfulKeys.has(resourceObjectSelectionKey(object)));
+          selectedWorkloadObjectKeys = selectedWorkloadObjectKeys.filter((key) => !successfulKeys.has(key));
+          reconcileWorkloadObjectSelection(workloadObjects);
         }
         if (
           editorResource
@@ -2396,20 +2592,24 @@
           && successfulKeys.has(resourceObjectSelectionKey(yamlObject))
         ) closeYamlEditor();
       }
-      if (failed.length) {
+      if (successfulCount && !targetContextStillCurrent) {
+        const remainingNames = failed.slice(0, 4).map(({ object }) => bulkDeletionObjectLabel(target, object)).join(', ');
+        const remainingSuffix = failed.length > 4 ? `, +${failed.length - 4} more` : '';
+        notify(`${successfulCount} deletion${successfulCount === 1 ? '' : 's'} completed; ${failed.length} failed or skipped (${remainingNames}${remainingSuffix}). Workspace changed, so refresh to verify.`);
+      } else if (failed.length) {
         const failedNames = failed.slice(0, 4).map(({ object }) => bulkDeletionObjectLabel(target, object)).join(', ');
         const suffix = failed.length > 4 ? `, +${failed.length - 4} more` : '';
         const reason = failed[0]?.error ? ` Reason: ${failed[0].error.slice(0, 120)}` : '';
-        notify(`${successfulKeys.size} deleted; ${failed.length} failed (${failedNames}${suffix}). Failed items remain selected.${reason}`);
+        notify(`${successfulCount} deleted; ${failed.length} failed (${failedNames}${suffix}). Failed items remain selected.${reason}`);
       } else {
-        notify(`Deleted ${successfulKeys.size} ${target.resource.kind}${successfulKeys.size === 1 ? '' : 's'} from ${activeCluster}`);
+        notify(`Deleted ${successfulCount} ${target.resource.kind}${successfulCount === 1 ? '' : 's'} from ${target.cluster}`);
       }
     } finally {
       deletingResource = false;
       bulkDeleteProgress = null;
       deletionTarget = null;
       deletionStep = 1;
-      deletionName = '';
+      restoreDeletionFocus();
       schedulePendingResumeRecovery();
     }
   }
@@ -2946,10 +3146,16 @@
       if (podResource) {
         workloadResource = podResource;
         workloadObjects = logPods;
+        clearWorkloadObjectSelection();
         workloadSearch = '';
       }
       closeEditor(false);
       activeView = 'Workloads';
+      if (podResource && activeClusterId) {
+        resourceObjectCache.set(resourceObjectCacheKey(activeClusterId, podResource, namespace), logPods);
+        markLiveDataAvailable(podResource, activeClusterId, namespace, 'Workloads');
+        startLiveObjectRefresh();
+      }
     }
     workloadDetailMode = 'logs';
     await selectLogPod(object);
@@ -3087,6 +3293,13 @@
     loadingOverview = false;
     loadingEvents = false;
     stopLiveObjectRefresh();
+    clearLiveDataFreshness();
+    clearResourceObjectSelection();
+    resourceObjects = [];
+    workloadObjects = [];
+    relatedPods = null;
+    relatedObject = null;
+    selectedResource = null;
     loadingObjects = false;
     loadingWorkloads = false;
     closeLogs();
@@ -3170,7 +3383,7 @@
   function deletionTargetName(target = deletionTarget) {
     if (!target) return '';
     if (target.type === 'resource') return target.object.name;
-    if (target.type === 'bulk-resource') return `DELETE ${target.resource.kind} ${target.objects.length} OBJECTS`;
+    if (target.type === 'bulk-resource') return `${target.objects.length} ${target.resource.kind} objects`;
     return target.cluster.name;
   }
 
@@ -3180,31 +3393,67 @@
     return objectNamespace ? `${objectNamespace}/${object.name}` : object.name;
   }
 
-  function requestResourceDeletion(resource: ResourceDescriptor, object: ResourceObject) {
-    if (savingEditor || loadingEditor) return;
-    deletionTarget = { type: 'resource', resource, object };
-    bulkDeleteProgress = null;
-    deletionStep = 1;
-    deletionName = '';
+  function beginDeletionFocus() {
+    deletionReturnFocus = typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    void tick().then(() => deletionDialog?.focus());
   }
 
-  function requestBulkResourceDeletion(resource: ResourceDescriptor) {
-    if (deletingResource || loadingEditor || savingEditor || loadingYaml || savingYaml || selectedResourceObjects.length < 1) return;
+  function restoreDeletionFocus() {
+    const previous = deletionReturnFocus;
+    deletionReturnFocus = null;
+    void tick().then(() => {
+      if (previous?.isConnected) {
+        previous.focus();
+        return;
+      }
+      document.querySelector<HTMLElement>('.resource-object-columns input, .workload-object-list-header input')?.focus();
+    });
+  }
+
+  function requestResourceDeletion(resource: ResourceDescriptor, object: ResourceObject) {
+    if (savingEditor || loadingEditor) return;
+    const view = activeView === 'Resources' || activeView === 'Workloads' ? activeView : null;
+    if (!activeClusterId || !view) return;
     deletionTarget = {
-      type: 'bulk-resource',
+      type: 'resource',
       resource,
-      objects: selectedResourceObjects.map((object) => ({ ...object })),
+      object: { ...object },
+      clusterId: activeClusterId,
+      cluster: activeCluster,
+      kubeconfigPath: activeKubeconfigPath || kubeconfigPath || undefined,
       namespaceScope: namespace,
+      view,
     };
     bulkDeleteProgress = null;
     deletionStep = 1;
-    deletionName = '';
+    beginDeletionFocus();
+  }
+
+  function requestBulkResourceDeletion(resource: ResourceDescriptor, objects = selectedResourceObjects) {
+    if (deletingResource || loadingEditor || savingEditor || loadingYaml || savingYaml || objects.length < 1) return;
+    const view = activeView === 'Resources' || activeView === 'Workloads' ? activeView : null;
+    if (!activeClusterId || !view) return;
+    deletionTarget = {
+      type: 'bulk-resource',
+      resource,
+      objects: objects.map((object) => ({ ...object })),
+      namespaceScope: namespace,
+      clusterId: activeClusterId,
+      cluster: activeCluster,
+      kubeconfigPath: activeKubeconfigPath || kubeconfigPath || undefined,
+      view,
+    };
+    bulkDeleteProgress = null;
+    deletionStep = 1;
+    beginDeletionFocus();
   }
 
   function requestClusterRemoval(cluster: Cluster) {
     deletionTarget = { type: 'cluster', cluster };
     deletionStep = 1;
-    deletionName = '';
+    beginDeletionFocus();
   }
 
   function removeCluster(id: string) {
@@ -3217,24 +3466,52 @@
     deletionTarget = null;
     bulkDeleteProgress = null;
     deletionStep = 1;
-    deletionName = '';
+    restoreDeletionFocus();
     schedulePendingResumeRecovery();
   }
 
   function continueDeletion() {
     deletionStep = 2;
-    deletionName = '';
+    void tick().then(() => deletionConfirmButton?.focus());
+  }
+
+  function handleDeletionDialogKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelDeletion();
+      return;
+    }
+    if (event.key !== 'Tab' || !deletionDialog) return;
+    const focusable = [...deletionDialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   async function confirmDeletion() {
     const target = deletionTarget;
-    if (!target || deletionName !== deletionTargetName(target)) return;
-    if (target.type === 'resource') await deleteResourceObject(target.resource, target.object);
+    if (!target || deletionStep !== 2 || deletingResource) return;
+    if (target.type === 'resource') await deleteResourceTarget(target);
     else if (target.type === 'bulk-resource') await deleteBulkResourceObjects(target);
     else await removeClusterContext(target.cluster);
   }
 
   async function removeClusterContext(cluster: Cluster) {
+    const currentCluster = clusters.find((candidate) => candidate.id === cluster.id);
+    if (!currentCluster || currentCluster.name !== cluster.name || currentCluster.kubeconfigPath !== cluster.kubeconfigPath) {
+      notify('Context removal canceled because the tracked cluster changed.');
+      deletionTarget = null;
+      deletionStep = 1;
+      restoreDeletionFocus();
+      return;
+    }
     deletingResource = true;
     try {
       const wasActive = activeClusterId === cluster.id;
@@ -3248,7 +3525,19 @@
       favoriteClusterNames = remainingFavoriteNames;
       clearClusterObjectCache(cluster.id);
       if (wasActive) {
+        resourceRequestGeneration += 1;
+        workloadRequestGeneration += 1;
+        loadingObjects = false;
+        loadingWorkloads = false;
         stopOverviewRefresh();
+        stopLiveObjectRefresh();
+        clearLiveDataFreshness();
+        resourceObjects = [];
+        workloadObjects = [];
+        relatedPods = null;
+        relatedObject = null;
+        clearResourceObjectSelection();
+        closeLogs();
         activeClusterId = '';
         activeCluster = clusters.length ? 'Select a cluster' : 'No cluster connected';
         activeKubeconfigPath = undefined;
@@ -3277,7 +3566,7 @@
       deletingResource = false;
       deletionTarget = null;
       deletionStep = 1;
-      deletionName = '';
+      restoreDeletionFocus();
       schedulePendingResumeRecovery();
     }
   }
@@ -3382,9 +3671,13 @@
     const requestGeneration = ++resourceRequestGeneration;
     const requestClusterId = activeClusterId;
     const requestNamespace = namespace;
+    const requestView = activeView;
     const requestResourceKey = resourceKey(resource);
     const previousResourceKey = selectedResource ? resourceKey(selectedResource) : '';
-    if (!silent && previousResourceKey !== requestResourceKey) clearResourceObjectSelection();
+    if (!silent && previousResourceKey !== requestResourceKey) {
+      if (activeClusterId && selectedResource) clearLiveDataFreshness(activeClusterId, selectedResource, namespace);
+      clearResourceObjectSelection();
+    }
     if (!silent) {
       closeEditor();
       closeYamlEditor();
@@ -3404,10 +3697,7 @@
       resourceObjects = cachedObjects;
       reconcileResourceObjectSelection(cachedObjects);
       loadingObjects = false;
-      if (liveDataUpdatedAt.has(cacheKey) && activeLiveDataKey() === cacheKey) {
-        liveDataStatus = 'live';
-        liveDataStatusMessage = '';
-      }
+      if (requestView === 'Resources') markLiveDataAvailable(resource, requestClusterId, requestNamespace, 'Resources');
       if (!silent && activeView === 'Resources') startLiveObjectRefresh();
       return;
     }
@@ -3435,12 +3725,13 @@
         if (requestGeneration !== resourceRequestGeneration
           || requestClusterId !== activeClusterId
           || requestNamespace !== namespace
+          || requestView !== activeView
           || !selectedResource
           || resourceKey(selectedResource) !== requestResourceKey) return;
         resourceObjects = response;
         resourceObjectCache.set(cacheKey, response);
         reconcileResourceObjectSelection(response);
-        markLiveDataAvailable(resource, requestClusterId, requestNamespace);
+        markLiveDataAvailable(resource, requestClusterId, requestNamespace, 'Resources');
         if (!silent && activeView === 'Resources') startLiveObjectRefresh();
         if (
           editorResource
@@ -3460,13 +3751,15 @@
         }
       }
     } catch (error) {
-      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId) {
-        markLiveDataUnavailable(`Could not list ${resource.kind}`);
+      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId && requestView === activeView) {
+        markLiveDataUnavailable(`Could not list ${resource.kind}`, liveRefreshContext(requestClusterId, 'Resources', resource, requestNamespace));
         notify(`Could not list ${resource.kind}: ${String(error)}`);
       }
     } finally {
-      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId && !silent) loadingObjects = false;
-      flushPendingResourceWatchRefresh();
+      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId && requestView === activeView && !silent) loadingObjects = false;
+      if (requestGeneration === resourceRequestGeneration && requestClusterId === activeClusterId && requestNamespace === namespace && requestView === activeView && selectedResource && resourceKey(selectedResource) === requestResourceKey) {
+        flushPendingResourceWatchRefresh();
+      }
     }
   }
 </script>
@@ -3587,8 +3880,8 @@
     <div class="content">
       <div class:cluster-page-heading={activeView === 'Clusters'} class:resource-page-heading={activeView === 'Resources'} class="page-heading">
         <div>
-          <div class="title-line"><h1>{activeView}</h1>{#if activeClusterId && !catalogError}{#if ['Workloads', 'Resources'].includes(activeView)}<span class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-pill live-status-pill" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><b></b> {liveDataStatusLabel()}</span>{:else}<span class="live-pill"><b></b> Live</span>{/if}{/if}</div>
-          <p>{pageContextDescription()}</p>
+          <div class="title-line"><h1>{activeView}</h1>{#if activeClusterId && !catalogError}{#if ['Workloads', 'Resources'].includes(activeView)}<span class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-pill live-status-pill" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><b></b> {liveDataStatusLabel()}</span>{:else}<span class="live-pill"><b></b> Live</span>{/if}{/if}</div>
+          {#if pageContextDescription()}<p>{pageContextDescription()}</p>{/if}
         </div>
       </div>
 
@@ -3763,7 +4056,7 @@
             <div class="resource-focus-heading">
               {#if selectedResource}
                 <div class="resource-focus-title"><span class:custom={selectedResource.crd}>{selectedResource.crd ? '◇' : '○'}</span><div><p class="eyebrow">Live resource</p><h2>{selectedResource.kind}</h2><p>{selectedResource.apiVersion} · {selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'}</p></div></div>
-                <span class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status resource-live-status" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><i></i>{liveDataStatusLabel()}</span>
+                <span class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status resource-live-status" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><i></i>{liveDataStatusLabel()}</span>
               {:else}
                 <div class="resource-focus-title"><span>⌁</span><div><p class="eyebrow">Resource workspace</p><h2>Choose a resource</h2><p>Use the Resources menu in the left sidebar to select an API kind.</p></div></div>
               {/if}
@@ -3772,9 +4065,9 @@
               <aside class="resource-object-browser" aria-label="Resource objects">
                 {#if selectedResource}
                   <div class="resource-object-heading resource-pane-heading"><span class="resource-pane-step">01</span><div><span class:custom={selectedResource.crd} class="resource-pane-icon">{selectedResource.crd ? '◇' : '○'}</span><div><strong>{selectedResource.kind} objects</strong><small>{selectedResource.namespaced ? (namespace === 'all namespaces' ? 'All namespaces' : namespace) : 'Cluster-wide'} · {selectedResource.plural}</small></div></div><b>{resourceObjects.length}</b></div>
-                  <div class="resource-object-columns" role="row" aria-label="Select loaded resource objects"><label class:resource-select-all-partial={resourceObjectsSelectionPartial} class="resource-select-all"><input type="checkbox" checked={allResourceObjectsSelected} disabled={loadingObjects || !resourceObjects.length} aria-checked={resourceObjectsSelectionPartial ? 'mixed' : allResourceObjectsSelected ? 'true' : 'false'} aria-label={`Select all loaded ${selectedResource.plural}`} on:change={toggleAllResourceObjects} /></label><span>Name</span><span>Namespace</span><span>Age</span><span>Action</span></div>
-                  {#if selectedResourceObjects.length}<div class="resource-bulk-toolbar" role="region" aria-label="Bulk resource actions"><span><strong>{selectedResourceObjects.length}</strong> selected</span><button class="destructive" type="button" disabled={deletingResource || loadingEditor || savingEditor || loadingYaml || savingYaml} on:click={() => requestBulkResourceDeletion(selectedResource!)}>Delete {selectedResourceObjects.length}</button><button class="resource-bulk-clear" type="button" on:click={clearResourceObjectSelection}>Clear</button></div>{/if}
-                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<div class:resource-object-row-selected={isResourceObjectSelected(object)} class="resource-object-row"><label class="resource-object-select"><input type="checkbox" checked={isResourceObjectSelected(object)} aria-label={`Select ${selectedResource.kind} ${object.name}`} on:change={() => toggleResourceObjectSelection(object)} /></label><button type="button" aria-busy={selectedResource.kind === 'Pod' && isOpeningLogs('Pod', object)} class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><div class="resource-object-primary"><strong>{object.name}</strong></div><span class="resource-object-namespace">{object.namespace || 'cluster scoped'}</span><small class="resource-object-age">{object.createdAt ? resourceAge(object.createdAt) : '—'}</small><span class="resource-object-action">{selectedResource.kind === 'Pod' ? (isOpeningLogs('Pod', object) ? 'Opening…' : 'Logs →') : 'Open →'}</span></button></div>{/each}</div>{/if}
+                  <div class="resource-object-columns" role="row" aria-label="Select loaded resource objects"><label class:resource-select-all-partial={resourceObjectsSelectionPartial} class="resource-select-all"><input type="checkbox" checked={allResourceObjectsSelected} disabled={deletingResource || loadingObjects || !resourceObjects.length} aria-checked={resourceObjectsSelectionPartial ? 'mixed' : allResourceObjectsSelected ? 'true' : 'false'} aria-label={`Select all loaded ${selectedResource.plural}`} on:change={toggleAllResourceObjects} /></label><span>Name</span><span>Namespace</span><span>Age</span><span>Action</span></div>
+                  {#if selectedResourceObjects.length}<div class="resource-bulk-toolbar" role="region" aria-label="Bulk resource actions"><span><strong>{selectedResourceObjects.length}</strong> selected</span><button class="destructive" type="button" disabled={deletingResource || loadingEditor || savingEditor || loadingYaml || savingYaml} on:click={() => requestBulkResourceDeletion(selectedResource!)}>Delete {selectedResourceObjects.length}</button><button class="resource-bulk-clear" type="button" disabled={deletingResource} on:click={clearResourceObjectSelection}>Clear</button></div>{/if}
+                  {#if loadingObjects}<div class="drawer-state"><i></i>Listing {selectedResource.plural}…</div>{:else if resourceObjects.length === 0}<div class="resource-object-empty"><span>○</span><strong>No {selectedResource.plural} found</strong><p>Try another namespace or use Refresh in the top bar.</p></div>{:else}<div class="object-list">{#each resourceObjects as object}<div class:resource-object-row-selected={isResourceObjectSelected(object)} class="resource-object-row"><label class="resource-object-select"><input type="checkbox" checked={isResourceObjectSelected(object)} disabled={deletingResource} aria-label={`Select ${selectedResource.kind} ${object.name}`} on:change={() => toggleResourceObjectSelection(object)} /></label><button type="button" aria-busy={selectedResource.kind === 'Pod' && isOpeningLogs('Pod', object)} class:object-selected={editorObject?.name === object.name && editorObject?.namespace === object.namespace} on:click={() => openObject(selectedResource!, object)}><div class="resource-object-primary"><strong>{object.name}</strong></div><span class="resource-object-namespace">{object.namespace || 'cluster scoped'}</span><small class="resource-object-age">{object.createdAt ? resourceAge(object.createdAt) : '—'}</small><span class="resource-object-action">{selectedResource.kind === 'Pod' ? (isOpeningLogs('Pod', object) ? 'Opening…' : 'Logs →') : 'Open →'}</span></button></div>{/each}</div>{/if}
                 {:else}
                   <div class="resource-object-empty"><span>⌘</span><strong>Select a resource kind</strong><p>Choose a kind from the left. Kuberniva loads only that API.</p></div>
                 {/if}
@@ -3876,35 +4169,39 @@
         {:else}
           <section class="workloads-page font-sans">
             <div class:workload-detail-open={(editorResource?.category === 'Workloads' && editorObject !== null) || (workloadDetailMode === 'logs' && logTarget !== null)} class:workload-logs-open={workloadDetailMode === 'logs' && logTarget !== null} class="workload-grid grid min-h-[560px]">
-              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><span class:live-list-status-connected={resourceWatchStatus === 'connected'} class:live-list-status-reconnecting={resourceWatchStatus === 'reconnecting' || resourceWatchStatus === 'connecting'} class="live-list-status"><i></i>{resourceWatchStatus === 'connected' ? 'Live' : resourceWatchStatus === 'reconnecting' ? 'Reconnecting' : resourceWatchStatus === 'connecting' ? 'Connecting' : 'Live updates off'}</span><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
+              <div class="workload-list-panel overflow-hidden rounded-2xl border border-white/10 bg-[#151924]/90 shadow-2xl shadow-black/10"><div class="workload-list-header flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4"><div><div class="flex items-center gap-2"><Container size={18} class="text-cyan-300" /><h3 class="m-0 text-lg font-semibold text-white">{workloadResource?.kind || 'Select a type'}</h3></div><p class="mb-0 mt-1 text-xs text-slate-400">{namespace} · {workloadResource?.apiVersion || 'Kubernetes API'}{#if workloadResource?.kind === 'Pod'} · CPU/memory from Metrics API{/if}</p></div><span class:live-status-loaded={liveDataStatus === 'loaded'} class:live-status-stale={liveDataStatus === 'stale'} class:live-status-paused={liveDataStatus === 'paused'} class:live-status-unavailable={liveDataStatus === 'unavailable'} class="live-list-status" title={liveDataStatusTitle()} aria-label={liveDataStatusTitle()} aria-live="polite"><i></i>{liveDataStatusLabel()}</span><label class="flex h-10 w-72 items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 text-slate-500 focus-within:border-indigo-400 focus-within:bg-black/30 focus-within:ring-2 focus-within:ring-indigo-500/20"><Search size={16} /><input class="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500" bind:value={workloadSearch} placeholder={`Filter ${workloadResource?.plural || 'workloads'}`} /></label></div>
                 {#if loadingWorkloads}
                   <div class="grid min-h-96 place-items-center text-sm text-slate-400"><div class="flex items-center gap-3"><RefreshCw size={18} class="animate-spin text-cyan-300" />Loading {workloadResource?.plural || 'workloads'}…</div></div>
                 {:else if visibleWorkloadObjects.length === 0}
                   <div class="grid min-h-96 place-items-center px-6 text-center"><div><div class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-indigo-500/15 text-cyan-300"><Boxes size={22} /></div><h4 class="mb-0 mt-4 text-base font-semibold text-slate-100">{workloadObjects.length ? 'No matching workloads' : `No ${workloadResource?.plural || 'workloads'} found`}</h4><p class="mb-0 mt-2 text-sm text-slate-400">{workloadObjects.length ? 'Try a different name or namespace filter.' : `Nothing was returned for ${namespace}.`}</p></div></div>
                 {:else}
                   <div class="workload-object-list" aria-label={`${workloadResource?.kind || 'Workload'} list`}>
-                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header" aria-label="Workload columns"><span></span><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Ready</span><span>CPU</span><span>Memory</span>{/if}<span>Age</span><span></span></div>
+                    <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class="workload-object-list-header workload-selection-header" aria-label="Workload columns"><label class:resource-select-all-partial={workloadObjectsSelectionPartial} class="resource-select-all"><input type="checkbox" checked={allWorkloadObjectsSelected} disabled={deletingResource || loadingWorkloads || !workloadObjects.length} aria-checked={workloadObjectsSelectionPartial ? 'mixed' : allWorkloadObjectsSelected ? 'true' : 'false'} aria-label={`Select all loaded ${workloadResource?.plural || 'workloads'}`} on:change={toggleAllWorkloadObjects} /></label><span>Name</span><span>Status</span>{#if workloadResource?.kind === 'Pod'}<span>Ready</span><span>CPU</span><span>Memory</span>{/if}<span>Age</span><span></span></div>
+                    {#if selectedWorkloadObjects.length}<div class="resource-bulk-toolbar workload-bulk-toolbar" role="region" aria-label="Bulk workload actions"><span><strong>{selectedWorkloadObjects.length}</strong> selected</span><button class="destructive" type="button" disabled={deletingResource || loadingEditor || savingEditor || loadingYaml || savingYaml} on:click={() => workloadResource && requestBulkResourceDeletion(workloadResource, selectedWorkloadObjects)}>Delete {selectedWorkloadObjects.length}</button><button class="resource-bulk-clear" type="button" disabled={deletingResource} on:click={clearWorkloadObjectSelection}>Clear</button></div>{/if}
                     {#each visibleWorkloadObjects as workload}
-                      <button
-                        class:workload-pod-row={workloadResource?.kind === 'Pod'}
-                        class:workload-object-selected={Boolean(
-                          editorResource
-                            && editorObject
-                            && workloadResource
-                            && resourceKey(editorResource) === resourceKey(workloadResource)
-                            && editorObject.name === workload.name
-                            && editorObject.namespace === workload.namespace
-                        )}
-                        class="workload-object-row group"
-                        on:click={() => workloadResource && openObject(workloadResource, workload)}
-                      >
-                        <span class={`workload-status-dot ${workloadStatusTone(workload)}`}></span>
-                        <div class="workload-object-name"><strong>{workload.name}</strong><small>{workload.namespace || 'cluster scope'}{#if workload.nodeName} · {workload.nodeName}{/if}</small></div>
-                        <div class="workload-row-fact"><b class={`workload-status-label ${workloadStatusTone(workload)}`}>{workloadStatusLabel(workload)}</b></div>
-                        {#if workloadResource?.kind === 'Pod'}<div class="workload-row-fact"><b>{podContainerSummary(workload)}{#if workload.restarts !== undefined && workload.restarts > 0}<small> · {workload.restarts} restarts</small>{/if}</b></div><div class="workload-row-fact"><b title={cpuMetricLabel(workload.cpuUsage)}>{cpuMetricLabel(workload.cpuUsage)}</b></div><div class="workload-row-fact"><b title={workload.memoryUsage || 'Metrics unavailable'}>{podMetricLabel(workload.memoryUsage)}</b></div>{/if}
-                        <div class="workload-row-fact workload-row-age"><b>{resourceAge(workload.createdAt)}</b></div>
-                        <ChevronRight size={17} class="workload-row-arrow" />
-                      </button>
+                      <div class:workload-pod-row={workloadResource?.kind === 'Pod'} class:resource-object-row-selected={isWorkloadObjectSelected(workload)} class="resource-object-row workload-selection-row">
+                        <label class="resource-object-select"><input type="checkbox" checked={isWorkloadObjectSelected(workload)} disabled={deletingResource} aria-label={`Select ${workloadResource?.kind || 'workload'} ${workload.name}`} on:change={() => toggleWorkloadObjectSelection(workload)} /></label>
+                        <button
+                          class:workload-pod-row={workloadResource?.kind === 'Pod'}
+                          class:workload-object-selected={Boolean(
+                            isWorkloadObjectSelected(workload)
+                            || (editorResource
+                              && editorObject
+                              && workloadResource
+                              && resourceKey(editorResource) === resourceKey(workloadResource)
+                              && editorObject.name === workload.name
+                              && editorObject.namespace === workload.namespace)
+                          )}
+                          class="workload-object-row group"
+                          on:click={() => workloadResource && openObject(workloadResource, workload)}
+                        >
+                          <div class="workload-object-name"><strong>{workload.name}</strong><small>{workload.namespace || 'cluster scope'}{#if workload.nodeName} · {workload.nodeName}{/if}</small></div>
+                          <div class="workload-row-fact"><b class={`workload-status-label ${workloadStatusTone(workload)}`}>{workloadStatusLabel(workload)}</b></div>
+                          {#if workloadResource?.kind === 'Pod'}<div class="workload-row-fact"><b>{podContainerSummary(workload)}{#if workload.restarts !== undefined && workload.restarts > 0}<small> · {workload.restarts} restarts</small>{/if}</b></div><div class="workload-row-fact"><b title={cpuMetricLabel(workload.cpuUsage)}>{cpuMetricLabel(workload.cpuUsage)}</b></div><div class="workload-row-fact"><b title={workload.memoryUsage || 'Metrics unavailable'}>{podMetricLabel(workload.memoryUsage)}</b></div>{/if}
+                          <div class="workload-row-fact workload-row-age"><b>{resourceAge(workload.createdAt)}</b></div>
+                          <ChevronRight size={17} class="workload-row-arrow" />
+                        </button>
+                      </div>
                     {/each}
                   </div>
                 {/if}
@@ -3982,18 +4279,18 @@
 
   {#if deletionTarget}
     <div class="modal-backdrop deletion-backdrop" role="presentation" on:click={cancelDeletion}>
-      <div class="deletion-modal" role="dialog" aria-modal="true" aria-label="Confirm deletion" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+      <div bind:this={deletionDialog} class="deletion-modal" role="dialog" aria-modal="true" aria-labelledby="deletion-dialog-title" aria-describedby="deletion-dialog-description" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation={handleDeletionDialogKeydown}>
         <div class="deletion-modal-mark">!</div>
         {#if deletionStep === 1}
           <p class="eyebrow">Review deletion request</p>
-          <h2>{deletionTarget.type === 'resource' ? `Delete ${deletionTarget.resource.kind}?` : deletionTarget.type === 'bulk-resource' ? `Delete ${deletionTarget.objects.length} ${deletionTarget.resource.kind}s?` : 'Remove kubeconfig context?'}</h2>
-          <p class="deletion-intro">{deletionTarget.type === 'resource' ? 'This sends a Kubernetes DELETE request only to the cluster and namespace shown below.' : deletionTarget.type === 'bulk-resource' ? 'This sends one Kubernetes DELETE request per selected object. The list stays scoped to the current resource kind and namespace.' : 'This removes the context from Kuberniva only. The original kubeconfig source remains unchanged.'}</p>
+          <h2 id="deletion-dialog-title">{deletionTarget.type === 'resource' ? `Delete ${deletionTarget.resource.kind}?` : deletionTarget.type === 'bulk-resource' ? `Delete ${deletionTarget.objects.length} ${deletionTarget.resource.kind}s?` : 'Remove kubeconfig context?'}</h2>
+          <p id="deletion-dialog-description" class="deletion-intro">{deletionTarget.type === 'resource' ? 'This sends a Kubernetes DELETE request only to the cluster and namespace shown below.' : deletionTarget.type === 'bulk-resource' ? 'This sends one Kubernetes DELETE request per selected object. The list stays scoped to the current resource kind and namespace.' : 'This removes the context from Kuberniva only. The original kubeconfig source remains unchanged.'}</p>
           <dl class="deletion-target-summary">
             <div><dt>Target</dt><dd>{deletionTargetName()}</dd></div>
             {#if deletionTarget.type === 'resource'}
-              <div><dt>Cluster</dt><dd>{activeCluster}</dd></div><div><dt>Namespace</dt><dd>{deletionTarget.object.namespace || 'cluster-scoped'}</dd></div>
+              <div><dt>Cluster</dt><dd>{deletionTarget.cluster}</dd></div><div><dt>Namespace</dt><dd>{deletionTarget.namespaceScope === 'all namespaces' ? (deletionTarget.object.namespace || 'all namespaces') : deletionTarget.namespaceScope}</dd></div>
             {:else if deletionTarget.type === 'bulk-resource'}
-              <div><dt>Cluster</dt><dd>{activeCluster}</dd></div><div><dt>Kind</dt><dd>{deletionTarget.resource.kind}</dd></div><div><dt>Scope</dt><dd>{deletionTarget.namespaceScope === 'all namespaces' ? 'All namespaces' : deletionTarget.namespaceScope}</dd></div><div><dt>Count</dt><dd>{deletionTarget.objects.length}</dd></div><div><dt>Selected</dt><dd class="deletion-selected-names" title={deletionTarget.objects.map((object) => bulkDeletionObjectLabel(deletionTarget, object)).join(', ')}>{deletionTarget.objects.map((object) => bulkDeletionObjectLabel(deletionTarget, object)).join(', ')}</dd></div>
+              <div><dt>Cluster</dt><dd>{deletionTarget.cluster}</dd></div><div><dt>Kind</dt><dd>{deletionTarget.resource.kind}</dd></div><div><dt>Scope</dt><dd>{deletionTarget.namespaceScope === 'all namespaces' ? 'All namespaces' : deletionTarget.namespaceScope}</dd></div><div><dt>Count</dt><dd>{deletionTarget.objects.length}</dd></div><div><dt>Selected</dt><dd class="deletion-selected-names" title={deletionTarget.objects.map((object) => bulkDeletionObjectLabel(deletionTarget, object)).join(', ')}>{deletionTarget.objects.map((object) => bulkDeletionObjectLabel(deletionTarget, object)).join(', ')}</dd></div>
             {:else}
               <div><dt>Source</dt><dd title={deletionTarget.cluster.kubeconfigPath}>{deletionTarget.cluster.kubeconfigPath}</dd></div>
             {/if}
@@ -4002,11 +4299,10 @@
           <div class="deletion-actions"><button class="secondary" disabled={deletingResource} on:click={cancelDeletion}>Cancel</button><button class="destructive" disabled={deletingResource} on:click={continueDeletion}>Continue</button></div>
         {:else}
           <p class="eyebrow">Final confirmation</p>
-          <h2>{deletionTarget.type === 'bulk-resource' ? 'Type the exact bulk phrase' : 'Type the name to confirm'}</h2>
-          <p class="deletion-intro">To complete this deletion, type <strong>{deletionTargetName()}</strong> exactly. This prevents an accidental delete from a fast click.</p>
-          <label class="deletion-name-input">{deletionTarget.type === 'resource' ? 'Resource name' : deletionTarget.type === 'bulk-resource' ? 'Bulk deletion phrase' : 'Context name'}<input bind:value={deletionName} autocomplete="off" spellcheck="false" placeholder={deletionTargetName()} /></label>
+          <h2 id="deletion-dialog-title">Are you sure?</h2>
+          <p id="deletion-dialog-description" class="deletion-intro">This is the final confirmation. Kubernetes will receive the exact deletion request described above, and the action cannot be undone.</p>
           {#if bulkDeleteProgress}<p class="bulk-delete-progress" aria-live="polite">Deleting {bulkDeleteProgress.completed} of {bulkDeleteProgress.total}… {bulkDeleteProgress.failed ? `${bulkDeleteProgress.failed} failed so far` : 'No failures so far'}</p>{/if}
-          <div class="deletion-actions"><button class="secondary" disabled={deletingResource} on:click={() => (deletionStep = 1)}>Back</button><button class="destructive" disabled={deletingResource || deletionName !== deletionTargetName()} on:click={confirmDeletion}>{deletingResource ? 'Deleting…' : deletionTarget.type === 'resource' ? 'Delete resource' : deletionTarget.type === 'bulk-resource' ? `Delete ${deletionTarget.objects.length} objects` : 'Remove from Kuberniva'}</button></div>
+          <div class="deletion-actions"><button class="secondary" disabled={deletingResource} on:click={() => { deletionStep = 1; void tick().then(() => deletionDialog?.focus()); }}>Back</button><button bind:this={deletionConfirmButton} class="destructive" disabled={deletingResource} on:click={confirmDeletion}>{deletingResource ? 'Deleting…' : deletionTarget.type === 'resource' ? 'Delete resource' : deletionTarget.type === 'bulk-resource' ? `Delete ${deletionTarget.objects.length} objects` : 'Remove from Kuberniva'}</button></div>
         {/if}
       </div>
     </div>

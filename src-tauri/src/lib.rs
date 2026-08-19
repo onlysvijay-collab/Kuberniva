@@ -4,8 +4,8 @@ use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{Event, Namespace, Node, Pod};
 use kube::{
     api::{
-        Api, AttachParams, DeleteParams, DynamicObject, ListParams, LogParams, WatchEvent,
-        WatchParams,
+        Api, AttachParams, DeleteParams, DynamicObject, ListParams, LogParams, Preconditions,
+        WatchEvent, WatchParams,
     },
     config::{KubeConfigOptions, Kubeconfig},
     core::ApiResource,
@@ -113,6 +113,10 @@ struct ResourceWatchSignal {
 struct ResourceObject {
     name: String,
     namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_version: Option<String>,
     created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
@@ -142,6 +146,8 @@ struct ResourceObjectRequest {
     namespaced: bool,
     namespace: Option<String>,
     name: String,
+    uid: Option<String>,
+    resource_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1349,6 +1355,8 @@ async fn pod_usage_map(
 fn pod_resource_object(pod: Pod, usage: Option<&(String, String)>) -> ResourceObject {
     let name = pod.metadata.name.unwrap_or_default();
     let namespace = pod.metadata.namespace;
+    let uid = pod.metadata.uid;
+    let resource_version = pod.metadata.resource_version;
     let created_at = pod
         .metadata
         .creation_timestamp
@@ -1372,6 +1380,8 @@ fn pod_resource_object(pod: Pod, usage: Option<&(String, String)>) -> ResourceOb
     ResourceObject {
         name,
         namespace,
+        uid,
+        resource_version,
         created_at,
         status: pod.status.as_ref().and_then(|status| status.phase.clone()),
         ready_containers: total_containers.map(|_| ready_containers),
@@ -2262,6 +2272,8 @@ async fn list_resource_objects(request: ResourceRequest) -> Result<Vec<ResourceO
         .map(|object| ResourceObject {
             name: object.metadata.name.unwrap_or_default(),
             namespace: object.metadata.namespace,
+            uid: object.metadata.uid,
+            resource_version: object.metadata.resource_version,
             created_at: object
                 .metadata
                 .creation_timestamp
@@ -2315,17 +2327,25 @@ async fn get_resource_detail(request: ResourceObjectRequest) -> Result<ResourceD
 async fn delete_resource_object(request: ResourceObjectRequest) -> Result<(), String> {
     let client = client_for(request.kubeconfig_path, request.context).await?;
     let resource = api_resource(request.group, request.version, request.kind, request.plural);
+    let delete_params = if request.uid.is_some() || request.resource_version.is_some() {
+        DeleteParams::default().preconditions(Preconditions {
+            uid: request.uid,
+            resource_version: request.resource_version,
+        })
+    } else {
+        DeleteParams::default()
+    };
     if request.namespaced {
         let namespace = request
             .namespace
             .ok_or_else(|| "A namespace is required for this resource".to_string())?;
         Api::<DynamicObject>::namespaced_with(client, &namespace, &resource)
-            .delete(&request.name, &DeleteParams::default())
+            .delete(&request.name, &delete_params)
             .await
             .map_err(|error| error.to_string())?;
     } else {
         Api::<DynamicObject>::all_with(client, &resource)
-            .delete(&request.name, &DeleteParams::default())
+            .delete(&request.name, &delete_params)
             .await
             .map_err(|error| error.to_string())?;
     }
