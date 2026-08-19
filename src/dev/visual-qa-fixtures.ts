@@ -44,6 +44,87 @@ export const visualQaPods = [
   };
 });
 
+export const visualQaDeployments = [
+  { name: 'api', status: 'Available', readyContainers: 3, totalContainers: 3, ageMinutes: 180 },
+  { name: 'worker', status: 'Available', readyContainers: 4, totalContainers: 4, ageMinutes: 420 },
+  { name: 'scheduler', status: 'Progressing', readyContainers: 1, totalContainers: 2, ageMinutes: 55 },
+].map((deployment, index) => ({
+  name: deployment.name,
+  namespace: 'platform',
+  uid: `visual-deployment-${index + 1}`,
+  resourceVersion: `${4600 + index}`,
+  createdAt: new Date(Date.now() - deployment.ageMinutes * 60_000).toISOString(),
+  status: deployment.status,
+  readyContainers: deployment.readyContainers,
+  totalContainers: deployment.totalContainers,
+}));
+
+export const visualQaWorkloadManifest = {
+  apiVersion: 'apps/v1',
+  kind: 'Deployment',
+  metadata: { name: 'api', namespace: 'platform', labels: { app: 'api', tier: 'backend' } },
+  spec: {
+    replicas: 3,
+    template: {
+      metadata: { labels: { app: 'api', tier: 'backend' } },
+      spec: {
+        imagePullSecrets: [{ name: 'registry-credentials' }],
+        containers: [{
+          name: 'api',
+          image: 'example.invalid/platform/api:3.8.2',
+          envFrom: [{ configMapRef: { name: 'api-settings' } }, { secretRef: { name: 'api-credentials' } }],
+          volumeMounts: [
+            { name: 'configuration', mountPath: '/etc/platform', readOnly: true },
+            { name: 'credentials', mountPath: '/var/run/secrets/platform', readOnly: true },
+            { name: 'cache', mountPath: '/var/cache/platform' },
+          ],
+        }],
+        volumes: [
+          { name: 'configuration', configMap: { name: 'api-settings' } },
+          { name: 'credentials', secret: { secretName: 'api-credentials' } },
+          { name: 'cache', emptyDir: {} },
+          { name: 'uploads', persistentVolumeClaim: { claimName: 'api-uploads' } },
+        ],
+      },
+    },
+  },
+  status: { readyReplicas: 3, availableReplicas: 3 },
+};
+
+export const visualQaWorkloadYaml = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: platform
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: api
+          image: example.invalid/platform/api:3.8.2
+          volumeMounts:
+            - name: configuration
+              mountPath: /etc/platform
+      volumes:
+        - name: configuration
+          configMap:
+            name: api-settings
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: api-uploads
+`;
+
+export const visualQaLogLines = [
+  '2026-08-19T05:10:21.105Z INFO server listening on :8080',
+  '2026-08-19T05:10:24.410Z INFO request completed method=GET path=/health status=200 duration=3ms',
+  '2026-08-19T05:10:29.028Z WARN cache miss key=tenant-settings',
+  '2026-08-19T05:10:29.041Z INFO database query completed duration=12ms',
+  '2026-08-19T05:10:34.991Z ERROR upstream timeout service=payments attempt=1',
+  '2026-08-19T05:10:35.112Z INFO retry succeeded service=payments attempt=2',
+  '2026-08-19T05:10:39.440Z INFO request completed method=POST path=/v1/jobs status=202 duration=46ms',
+];
+
 export const visualQaConfigMaps = [
   'api-settings',
   'feature-flags',

@@ -80,6 +80,7 @@
   let selectedCategory: ResourceCategory | 'All resources' = 'All resources';
   let sidebarWorkloadMenuOpen = false;
   let sidebarResourceMenuOpen = false;
+  let sidebarTypeActivePanel: 'workload' | 'resource' = 'workload';
   let sidebarResourceSearch = '';
   let sidebarResourceCategory: ResourceCategory | 'All resources' = 'All resources';
   let theme: ThemeMode = 'light';
@@ -103,6 +104,7 @@
   let logPorts: PodPort[] = [];
   let logScopeLabel = '';
   let logLines: string[] = [];
+  let logSearch = '';
   let logSinceTime = '';
   let logContainers: string[] = [];
   let selectedLogContainer: string | undefined;
@@ -324,6 +326,10 @@
     ? activeClusterPortForwards.filter((forward) => forward.pod === logTarget?.pod
       && forward.namespace === logTarget?.namespace)
     : [];
+  $: normalizedLogSearch = logSearch.trim().toLowerCase();
+  $: visibleLogLines = normalizedLogSearch
+    ? logLines.filter((line) => line.toLowerCase().includes(normalizedLogSearch))
+    : logLines;
   $: editorLogsOpening = editorResource && editorObject
     ? isOpeningLogs(editorResource.kind, editorObject)
     : false;
@@ -911,7 +917,7 @@
   async function restoreVisualQaScenario() {
     if (!import.meta.env.DEV) return false;
     const scenario = new URLSearchParams(window.location.search).get('visual-qa');
-    if (!scenario || !['overview', 'workloads', 'workloads-first-open', 'resources', 'configuration', 'secret'].includes(scenario)) return false;
+    if (!scenario || !['overview', 'workloads', 'workloads-first-open', 'workload-details', 'workload-logs', 'workload-yaml', 'resources', 'configuration', 'secret'].includes(scenario)) return false;
     const fixtures = await import('./dev/visual-qa-fixtures');
     const qaCluster = fixtures.visualQaCluster as Cluster;
     const qaResources = fixtures.visualQaResources as ResourceDescriptor[];
@@ -931,10 +937,15 @@
       activeView = 'Overview';
       clusterOverview = fixtures.visualQaOverview as ClusterOverview;
       selectedNodeName = clusterOverview.nodes[0]?.name || '';
-    } else if (scenario === 'workloads' || scenario === 'workloads-first-open') {
+    } else if (scenario === 'workloads' || scenario === 'workloads-first-open' || scenario === 'workload-details' || scenario === 'workload-logs' || scenario === 'workload-yaml') {
+      const showWorkloadDetail = scenario === 'workload-details' || scenario === 'workload-logs' || scenario === 'workload-yaml';
       activeView = 'Workloads';
-      workloadResource = qaResources.find((resource) => resource.kind === 'Pod') || null;
-      workloadObjects = scenario === 'workloads-first-open' ? [] : fixtures.visualQaPods as ResourceObject[];
+      workloadResource = qaResources.find((resource) => resource.kind === (showWorkloadDetail ? 'Deployment' : 'Pod')) || null;
+      workloadObjects = scenario === 'workloads-first-open'
+        ? []
+        : showWorkloadDetail
+          ? fixtures.visualQaDeployments as ResourceObject[]
+          : fixtures.visualQaPods as ResourceObject[];
       loadingWorkloads = scenario === 'workloads-first-open';
       if (workloadResource) {
         const key = resourceObjectCacheKey(qaCluster.id, workloadResource, namespace);
@@ -965,6 +976,28 @@
           resourceWatchDataKey = key;
           liveDataStatus = 'live';
           selectedWorkloadObjectKeys = [resourceObjectSelectionKey(workloadObjects[1])];
+          if (showWorkloadDetail) {
+            editorResource = workloadResource;
+            editorObject = workloadObjects[0];
+            editorManifest = fixtures.visualQaWorkloadManifest as Record<string, unknown>;
+            loadingEditor = false;
+            if (scenario === 'workload-logs') {
+              workloadDetailMode = 'logs';
+              logPods = fixtures.visualQaPods as ResourceObject[];
+              logTarget = { pod: logPods[0].name, namespace: logPods[0].namespace || namespace };
+              logScopeLabel = `Deployment · ${editorObject.name}`;
+              logLines = fixtures.visualQaLogLines as string[];
+              logContainers = ['api', 'telemetry-sidecar'];
+              selectedLogContainer = 'api';
+              logPorts = [{ container: 'api', name: 'http', port: 8080, protocol: 'TCP' }];
+            } else if (scenario === 'workload-yaml') {
+              yamlResource = workloadResource;
+              yamlObject = editorObject;
+              yamlText = fixtures.visualQaWorkloadYaml as string;
+              yamlOriginal = yamlText;
+              yamlMode = 'view';
+            }
+          }
         }
       }
     } else {
@@ -1937,14 +1970,20 @@
   }
 
   function closeSidebarTypeMenu(menu: SidebarTypeMenu, restoreFocus = false) {
-    if (menu === 'workload') sidebarWorkloadMenuOpen = false;
-    else sidebarResourceMenuOpen = false;
+    if (menu === 'workload') {
+      sidebarWorkloadMenuOpen = false;
+      if (sidebarResourceMenuOpen) sidebarTypeActivePanel = 'resource';
+    } else {
+      sidebarResourceMenuOpen = false;
+      if (sidebarWorkloadMenuOpen) sidebarTypeActivePanel = 'workload';
+    }
     if (restoreFocus) void tick().then(() => document.getElementById(sidebarTypeTriggerId(menu))?.focus());
   }
 
   async function openSidebarTypeMenu(menu: SidebarTypeMenu, focusLast = false) {
     if (menu === 'workload') sidebarWorkloadMenuOpen = true;
     else sidebarResourceMenuOpen = true;
+    sidebarTypeActivePanel = menu;
     await tick();
     const options = Array.from(document.querySelectorAll<HTMLButtonElement>(`#${sidebarTypeMenuId(menu)} [role="option"]`));
     if (!options.length) return;
@@ -1956,8 +1995,14 @@
     const isOpen = menu === 'workload' ? sidebarWorkloadMenuOpen : sidebarResourceMenuOpen;
     const targetView: View = menu === 'workload' ? 'Workloads' : 'Resources';
     if (activeView === targetView) {
-      if (menu === 'workload') sidebarWorkloadMenuOpen = !isOpen;
-      else sidebarResourceMenuOpen = !isOpen;
+      if (menu === 'workload') {
+        sidebarWorkloadMenuOpen = !isOpen;
+        if (!sidebarWorkloadMenuOpen && sidebarResourceMenuOpen) sidebarTypeActivePanel = 'resource';
+      } else {
+        sidebarResourceMenuOpen = !isOpen;
+        if (!sidebarResourceMenuOpen && sidebarWorkloadMenuOpen) sidebarTypeActivePanel = 'workload';
+      }
+      if (!isOpen) sidebarTypeActivePanel = menu;
       return;
     }
     void navigateTo(targetView).then(() => {
@@ -1966,6 +2011,7 @@
     });
     if (menu === 'workload') sidebarWorkloadMenuOpen = true;
     else sidebarResourceMenuOpen = true;
+    sidebarTypeActivePanel = menu;
   }
 
   function handleSidebarTypeTriggerKeydown(event: KeyboardEvent, menu: SidebarTypeMenu) {
@@ -1998,12 +2044,14 @@
   async function selectSidebarResourceType(resource: ResourceDescriptor) {
     selectedCategory = resource.category;
     sidebarResourceCategory = resource.category;
+    sidebarTypeActivePanel = 'resource';
     await navigateTo('Resources');
     await openResource(resource);
     sidebarResourceMenuOpen = true;
   }
 
   async function selectSidebarWorkloadType(resource: ResourceDescriptor) {
+    sidebarTypeActivePanel = 'workload';
     if (activeView !== 'Workloads') {
       workloadResource = resource;
       await navigateTo('Workloads');
@@ -2347,6 +2395,81 @@
       });
     });
     return { configMaps: [...configMaps], secrets: [...secrets] };
+  }
+
+  function workloadVolumes(manifest: Record<string, unknown> | null) {
+    const podSpec = workloadPodSpec(manifest);
+    const mountsByVolume = new Map<string, string[]>();
+    const addMount = (volumeName: unknown, location: unknown, readOnly = false) => {
+      const name = asString(volumeName);
+      const path = asString(location);
+      if (!name || !path) return;
+      const mounts = mountsByVolume.get(name) || [];
+      mounts.push(`${path}${readOnly ? ' · read-only' : ''}`);
+      mountsByVolume.set(name, mounts);
+    };
+    [...asArray(podSpec.initContainers), ...asArray(podSpec.containers)].forEach((container) => {
+      const entry = asRecord(container);
+      asArray(entry.volumeMounts).forEach((mount) => {
+        const volumeMount = asRecord(mount);
+        addMount(volumeMount.name, volumeMount.mountPath, volumeMount.readOnly === true);
+      });
+      asArray(entry.volumeDevices).forEach((device) => {
+        const volumeDevice = asRecord(device);
+        addMount(volumeDevice.name, volumeDevice.devicePath);
+      });
+    });
+    return asArray(podSpec.volumes).map((volume, index) => {
+      const entry = asRecord(volume);
+      const name = asString(entry.name) || `volume-${index + 1}`;
+      const configMap = asRecord(entry.configMap);
+      const secret = asRecord(entry.secret);
+      const claim = asRecord(entry.persistentVolumeClaim);
+      const hostPath = asRecord(entry.hostPath);
+      const csi = asRecord(entry.csi);
+      const nfs = asRecord(entry.nfs);
+      const projectedSources = asArray(asRecord(entry.projected).sources);
+      const configMapName = asString(configMap.name);
+      const secretName = asString(secret.secretName);
+      const claimName = asString(claim.claimName);
+      const hostPathName = asString(hostPath.path);
+      const csiDriver = asString(csi.driver);
+      const nfsServer = asString(nfs.server);
+      let type = 'Volume';
+      let source = 'Kubernetes-managed source';
+      if (configMapName) {
+        type = 'ConfigMap';
+        source = configMapName;
+      } else if (secretName) {
+        type = 'Secret';
+        source = secretName;
+      } else if (claimName) {
+        type = 'PersistentVolumeClaim';
+        source = claimName;
+      } else if (entry.emptyDir !== undefined) {
+        type = 'EmptyDir';
+        source = asString(asRecord(entry.emptyDir).medium) || 'Node-backed ephemeral storage';
+      } else if (hostPathName) {
+        type = 'HostPath';
+        source = hostPathName;
+      } else if (csiDriver) {
+        type = 'CSI';
+        source = csiDriver;
+      } else if (nfsServer) {
+        type = 'NFS';
+        source = `${nfsServer}:${asString(nfs.path) || '/'}`;
+      } else if (projectedSources.length) {
+        type = 'Projected';
+        source = `${projectedSources.length} projected source${projectedSources.length === 1 ? '' : 's'}`;
+      } else if (entry.downwardAPI !== undefined) {
+        type = 'Downward API';
+        source = 'Pod metadata';
+      } else if (entry.ephemeral !== undefined) {
+        type = 'Ephemeral claim';
+        source = 'Generated from a volume claim template';
+      }
+      return { name, type, source, mounts: mountsByVolume.get(name) || [] };
+    });
   }
 
   function workloadReplicaSummary(manifest: Record<string, unknown> | null) {
@@ -2832,6 +2955,7 @@
     logPorts = [];
     logScopeLabel = '';
     logLines = [];
+    logSearch = '';
     logSinceTime = '';
     logContainers = [];
     selectedLogContainer = undefined;
@@ -2843,6 +2967,11 @@
     closeLogs();
     workloadDetailMode = 'overview';
     schedulePendingResumeRecovery();
+  }
+
+  function returnToWorkloadList() {
+    closeWorkloadLogs();
+    closeEditor(false);
   }
 
   function logLineTimestamp(line: string) {
@@ -3945,7 +4074,14 @@
         <button type="button" aria-label="Close resource navigator" title="Close resource navigator" on:click={() => closeSidebarTypeMenus()}>×</button>
       </header>
 
-      {#if sidebarWorkloadMenuOpen}
+      {#if sidebarWorkloadMenuOpen && sidebarResourceMenuOpen}
+        <nav class="workspace-type-tabs" aria-label="Navigator section">
+          <button class:workspace-type-tab-active={sidebarTypeActivePanel === 'workload'} type="button" on:click={() => (sidebarTypeActivePanel = 'workload')}><Workflow size={13} /><span>Workloads</span><small>{workloadResources.length}</small></button>
+          <button class:workspace-type-tab-active={sidebarTypeActivePanel === 'resource'} type="button" on:click={() => (sidebarTypeActivePanel = 'resource')}><Database size={13} /><span>Resources</span><small>{resourceWorkspaceResources.length}</small></button>
+        </nav>
+      {/if}
+
+      {#if sidebarWorkloadMenuOpen && (!sidebarResourceMenuOpen || sidebarTypeActivePanel === 'workload')}
         <section class="workspace-type-section workspace-workload-section" aria-labelledby="workspace-workload-heading">
           <header>
             <div><span class="workspace-type-mark"><Workflow size={15} strokeWidth={1.9} /></span><span><strong id="workspace-workload-heading">Workloads</strong><small>{workloadResources.length} API types</small></span></div>
@@ -3959,7 +4095,7 @@
         </section>
       {/if}
 
-      {#if sidebarResourceMenuOpen}
+      {#if sidebarResourceMenuOpen && (!sidebarWorkloadMenuOpen || sidebarTypeActivePanel === 'resource')}
         <section class="workspace-type-section workspace-resource-section" aria-labelledby="workspace-resource-heading">
           <header>
             <div><span class="workspace-type-mark"><Database size={15} strokeWidth={1.9} /></span><span><strong id="workspace-resource-heading">Resources</strong><small>{resourceWorkspaceResources.length} API types</small></span></div>
@@ -4210,7 +4346,7 @@
                 <div class="resource-inspector-surface">
                 {#if !(editorResource && (editorResource.kind === 'Secret' || editorResource.kind === 'ConfigMap'))}<div class="resource-details-heading resource-pane-heading"><span>02</span><div><strong>Details</strong><small>Live properties and actions</small></div></div>{/if}
                 {#if editorResource && editorObject}
-                  <div class="drawer-heading inspector-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Back to resource objects" on:click={() => closeEditor()}>×</button></div>
+                  <div class="drawer-heading inspector-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><div class="inspector-heading-actions"><button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>YAML</button><button aria-label="Back to resource objects" on:click={() => closeEditor()}>×</button></div></div>
                   {#if loadingEditor}
                     <div class="drawer-state"><i></i>Loading live resource details…</div>
                   {:else}
@@ -4331,19 +4467,20 @@
               </div>
               {#if workloadDetailMode === 'logs' && logTarget}
                 <aside class="workload-inspector workload-log-inspector" aria-label={`${logTarget.pod} logs`}>
-                  <div class="workload-inspector-heading workload-log-heading"><div><p class="eyebrow">Live logs</p><h3>{logTarget.pod}</h3><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="workload-inspector-actions"><button class="secondary workload-log-back" on:click={closeWorkloadLogs}>← Details</button><button aria-label="Close logs" on:click={closeWorkloadLogs}>×</button></div></div>
+                  <div class="workload-inspector-heading workload-log-heading"><div><p class="eyebrow">Live logs</p><h3>{logTarget.pod}</h3><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="workload-inspector-actions">{#if editorResource && editorObject}<button class="secondary workload-log-back" on:click={closeWorkloadLogs}>← Details</button>{/if}<button aria-label="Close logs" on:click={closeWorkloadLogs}>×</button></div></div>
                   <div class="workload-log-body">
+                    <nav class="workload-log-level-bar" aria-label="Log navigation"><button type="button" on:click={returnToWorkloadList}>← All {workloadResource?.plural || 'workloads'}</button><span>{logScopeLabel || 'Pod'} / {logTarget.pod}</span></nav>
                     <section class="workload-log-pod-picker"><div><div><strong>Pod stream</strong><small>{logPods.length} available for this workload</small></div><label>Switch Pod<select value={logTargetKey(logTarget)} on:change={(event) => selectLogPodByKey(event.currentTarget.value)}>{#each logPods as pod}<option value={logPodKey(pod)}>{pod.name} · {pod.namespace || namespace}</option>{/each}</select></label></div></section>
-                    <section class="workload-log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first stream…' : loadingLogs ? 'Refreshing now…' : 'Auto-refreshes every 30 seconds · select, copy, or download'}</small></div><div class="workload-log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class="log-tool-button" disabled={loadingLogs || !logTarget} aria-label="Refresh logs now" title="Refresh logs now" on:click={() => loadLogs(true)}><RefreshCw size={13} class={loadingLogs ? 'animate-spin' : ''} /><span>{loadingLogs ? 'Refreshing' : 'Refresh'}</span></button><button class:log-tool-button-copied={logsCopied} class="log-tool-button" disabled={!logLines.length} aria-label="Copy all logs" title="Copy all logs" on:click={copyLogs}>{#if logsCopied}<Check size={13} />{:else}<Copy size={13} />{/if}<span>{logsCopied ? 'Copied' : 'Copy'}</span></button><button class="log-tool-button" disabled={!logLines.length || downloadingLogs} aria-label="Download current logs" title="Download current logs" on:click={downloadLogs}><Download size={13} /><span>{downloadingLogs ? 'Saving' : 'Download'}</span></button><button class:port-forward-open={portForwardOpen} class="port-forward-button" on:click={openPortForwardForm}>⇄ Forward</button></div></section>
+                    <section class="workload-log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first stream…' : loadingLogs ? 'Refreshing now…' : 'Auto-refreshes every 30 seconds · select, copy, or download'}</small></div><div class="log-search" role="search"><Search size={13} /><input bind:value={logSearch} placeholder="Search logs" aria-label="Search log output" spellcheck="false" />{#if logSearch}<span>{visibleLogLines.length}/{logLines.length}</span><button type="button" aria-label="Clear log search" on:click={() => (logSearch = '')}>×</button>{/if}</div><div class="workload-log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class="log-tool-button" disabled={loadingLogs || !logTarget} aria-label="Refresh logs now" title="Refresh logs now" on:click={() => loadLogs(true)}><RefreshCw size={13} class={loadingLogs ? 'animate-spin' : ''} /><span>{loadingLogs ? 'Refreshing' : 'Refresh'}</span></button><button class:log-tool-button-copied={logsCopied} class="log-tool-button" disabled={!logLines.length} aria-label="Copy all logs" title="Copy all logs" on:click={copyLogs}>{#if logsCopied}<Check size={13} />{:else}<Copy size={13} />{/if}<span>{logsCopied ? 'Copied' : 'Copy'}</span></button><button class="log-tool-button" disabled={!logLines.length || downloadingLogs} aria-label="Download current logs" title="Download current logs" on:click={downloadLogs}><Download size={13} /><span>{downloadingLogs ? 'Saving' : 'Download'}</span></button><button class:port-forward-open={portForwardOpen} class="port-forward-button" on:click={openPortForwardForm}>⇄ Forward</button></div></section>
                     {#if logPorts.length}<section class="workload-log-ports"><strong>Container ports</strong><div>{#each logPorts as port}<span title={`${port.container}${port.name ? ` · ${port.name}` : ''} · ${port.protocol}`}>{port.port}/{port.protocol}<small>{port.container}</small></span>{/each}</div></section>{/if}
                     {#if portForwardOpen}<section class="port-forward-form workload-log-forward-form"><div><strong>Port forward</strong><button aria-label="Close port forward" on:click={() => (portForwardOpen = false)}>×</button></div><p>Expose {logTarget.pod} only on this Mac.</p><label>Remote port<input list="kuberniva-pod-ports" type="number" min="1" max="65535" bind:value={portForwardRemotePort} placeholder="e.g. 8080" /></label><datalist id="kuberniva-pod-ports">{#each suggestedForwardPorts as port}<option value={port}></option>{/each}</datalist><label>Local port<input type="number" min="1" max="65535" bind:value={portForwardLocalPort} placeholder="e.g. 8080" /></label><button class="primary" disabled={portForwarding} on:click={startPortForward}>{portForwarding ? 'Starting…' : 'Start forward'}</button></section>{/if}
                     {#if selectedPodPortForwards.length}<section class="log-active-forwards"><div><span>Saved forwards</span><small>{selectedPodPortForwards.length}</small></div>{#each selectedPodPortForwards as forward}<div class="log-active-forward"><span class:port-forward-paused-dot={forward.active === false} class="port-forward-listening-dot"></span><div><strong>{forward.localAddress}</strong><small>{forward.active === false ? 'Saved · resumes on reconnect' : `Local → ${forward.remotePort}`}</small></div><button disabled={Boolean(stoppingPortForwardId)} on:click={() => stopPortForward(forward)}>{stoppingPortForwardId === forward.id ? 'Stopping…' : 'Stop'}</button></div>{/each}</section>{/if}
-                    {#if loadingLogs && logLines.length === 0}<div class="workload-log-opening"><RefreshCw size={18} class="animate-spin" /><div><strong>Opening logs…</strong><small>Connecting to {logTarget.pod}{selectedLogContainer ? ` · ${selectedLogContainer}` : ''}</small></div></div>{:else}<pre bind:this={logViewport} class="workload-log-output" aria-label={`${logTarget.pod} logs`}>{logLines.length ? logLines.join('\n') : 'No log lines returned yet.'}</pre>{/if}
+                    {#if loadingLogs && logLines.length === 0}<div class="workload-log-opening"><RefreshCw size={18} class="animate-spin" /><div><strong>Opening logs…</strong><small>Connecting to {logTarget.pod}{selectedLogContainer ? ` · ${selectedLogContainer}` : ''}</small></div></div>{:else}<pre bind:this={logViewport} class="workload-log-output" aria-label={`${logTarget.pod} logs`}>{logLines.length ? (visibleLogLines.length ? visibleLogLines.join('\n') : `No log lines match “${logSearch}”.`) : 'No log lines returned yet.'}</pre>{/if}
                   </div>
                 </aside>
               {:else if editorResource && editorObject && editorResource.category === 'Workloads'}
                 <aside class="workload-inspector" aria-label="Workload details">
-                  <div class="workload-inspector-heading"><div><p class="eyebrow">Live workload details</p><h3>{editorObject.name}</h3><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div><div class="workload-inspector-actions"><button class="workload-delete" disabled={loadingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button><button aria-label="Close workload details" on:click={() => closeEditor()}>×</button></div></div>
+                  <div class="workload-inspector-heading"><div><p class="eyebrow">Live workload details</p><h3>{editorObject.name}</h3><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div><div class="workload-inspector-actions"><button class="secondary workload-yaml" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>YAML</button><button class="workload-delete" disabled={loadingEditor} on:click={() => requestResourceDeletion(editorResource!, editorObject!)}>Delete</button><button aria-label="Close workload details" on:click={() => closeEditor()}>×</button></div></div>
                   {#if loadingEditor}
                     <div class="drawer-state"><i></i>Loading live workload details…</div>
                   {:else if workloadDetailMode === 'terminal'}
@@ -4366,6 +4503,7 @@
                       {#if editorResource.kind === 'Pod'}<section class="workload-pod-facts"><div><span>Phase</span><strong class={`workload-status-label ${workloadStatusTone(editorObject)}`}>{workloadStatusLabel(editorObject)}</strong></div><div><span>Containers</span><strong>{podContainerSummary(editorObject)}</strong></div><div><span>Restarts</span><strong>{editorObject.restarts ?? 0}</strong></div><div><span>Age</span><strong>{resourceAge(editorObject.createdAt)}</strong></div>{#if editorObject.cpuUsage}<div><span>CPU used</span><strong>{cpuMetricLabel(editorObject.cpuUsage)}</strong></div>{/if}{#if editorObject.memoryUsage}<div><span>Memory used</span><strong>{editorObject.memoryUsage}</strong></div>{/if}{#if editorObject.nodeName}<div class="workload-pod-fact-wide"><span>Node</span><strong>{editorObject.nodeName}</strong></div>{/if}</section>{/if}
                       <section class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>Container images</strong><small>Images declared on the Pod template</small></div><b>{workloadImages(editorManifest).length}</b></div>{#if workloadImages(editorManifest).length}<div class="workload-image-list">{#each workloadImages(editorManifest) as container}<div><span>{container.init ? 'Init' : 'App'}</span><strong>{container.name}</strong><small title={container.image}>{container.image}</small></div>{/each}</div>{:else}<p>No container image is declared on this resource.</p>{/if}</section>
                       <section class="workload-attachment-grid"><div class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>ConfigMaps</strong><small>Environment and volume references</small></div><b>{workloadAttachments(editorManifest).configMaps.length}</b></div>{#if workloadAttachments(editorManifest).configMaps.length}<div class="workload-reference-list">{#each workloadAttachments(editorManifest).configMaps as configMap}<span>◇ {configMap}</span>{/each}</div>{:else}<p>No ConfigMap is attached.</p>{/if}</div><div class="workload-detail-card"><div class="workload-detail-card-heading"><div><strong>Secrets</strong><small>Environment, pull, and volume references</small></div><b>{workloadAttachments(editorManifest).secrets.length}</b></div>{#if workloadAttachments(editorManifest).secrets.length}<div class="workload-reference-list secret-reference-list">{#each workloadAttachments(editorManifest).secrets as secret}<span>◈ {secret}</span>{/each}</div>{:else}<p>No Secret is attached.</p>{/if}</div></section>
+                      <section class="workload-detail-card workload-volumes-card"><div class="workload-detail-card-heading"><div><strong>Volumes & mounts</strong><small>Volume sources mapped to container paths</small></div><b>{workloadVolumes(editorManifest).length}</b></div>{#if workloadVolumes(editorManifest).length}<div class="workload-volume-list">{#each workloadVolumes(editorManifest) as volume}<article><div><strong>{volume.name}</strong><small>{volume.type} · {volume.source}</small></div><div>{#if volume.mounts.length}{#each volume.mounts as mount}<code>{mount}</code>{/each}{:else}<em>Declared but not mounted</em>{/if}</div></article>{/each}</div>{:else}<p>No volume is declared on this Pod template.</p>{/if}</section>
                       {#if resourceLabels(editorManifest).length}<section class="resource-labels workload-labels"><strong>Labels</strong><div class="inspector-chip-list">{#each resourceLabels(editorManifest) as [key, value]}<span><b>{key}</b>{value}</span>{/each}</div></section>{/if}
                     </div>
                   {/if}
@@ -4389,8 +4527,8 @@
             </aside>
             <div class="log-stream-panel">
               <div class="log-stream-heading"><div><p class="eyebrow">Streaming output</p><h2>{logTarget.pod}</h2><p>{activeCluster} · {logScopeLabel || 'Pod'} · {logTarget.namespace}</p></div><div class="table-actions"><button class="secondary" on:click={() => { closeLogs(); void navigateTo('Workloads') }}>← Back to workloads</button></div></div>
-              <div class="log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first live stream…' : loadingLogs ? 'Refreshing now…' : 'Auto-refreshes every 30 seconds · select, copy, or download'}</small></div><div class="log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class="log-tool-button" disabled={loadingLogs || !logTarget} on:click={() => loadLogs(true)}><RefreshCw size={13} class={loadingLogs ? 'animate-spin' : ''} /><span>{loadingLogs ? 'Refreshing' : 'Refresh'}</span></button><button class:log-tool-button-copied={logsCopied} class="log-tool-button" disabled={!logLines.length} on:click={copyLogs}>{#if logsCopied}<Check size={13} />{:else}<Copy size={13} />{/if}<span>{logsCopied ? 'Copied' : 'Copy'}</span></button><button class="log-tool-button" disabled={!logLines.length || downloadingLogs} on:click={downloadLogs}><Download size={13} /><span>{downloadingLogs ? 'Saving' : 'Download'}</span></button></div></div>
-              {#if loadingLogs && logLines.length === 0}<div class="log-opening-state"><span><RefreshCw size={22} class="animate-spin" /></span><div><p class="eyebrow">Opening logs</p><h3>{logTarget.pod}</h3><p>Connecting to the Pod and preparing the first live output. You can switch Pods from the left after it opens.</p></div></div>{:else}<pre class="live-log-output" bind:this={logViewport} aria-label={`${logTarget.pod} logs`}>{#if logLines.length}{logLines.join('\n')}{:else}The Pod returned no log lines for this container yet.{/if}</pre>{/if}
+              <div class="log-toolbar"><div><strong>Live logs</strong><small>{openingLogsTarget ? 'Opening the first live stream…' : loadingLogs ? 'Refreshing now…' : 'Auto-refreshes every 30 seconds · select, copy, or download'}</small></div><div class="log-search" role="search"><Search size={13} /><input bind:value={logSearch} placeholder="Search logs" aria-label="Search log output" spellcheck="false" />{#if logSearch}<span>{visibleLogLines.length}/{logLines.length}</span><button type="button" aria-label="Clear log search" on:click={() => (logSearch = '')}>×</button>{/if}</div><div class="log-toolbar-actions">{#if logContainers.length > 1}<label>Container <select bind:value={selectedLogContainer} on:change={() => loadLogs(true)}>{#each logContainers as container}<option value={container}>{container}</option>{/each}</select></label>{/if}<button class="log-tool-button" disabled={loadingLogs || !logTarget} on:click={() => loadLogs(true)}><RefreshCw size={13} class={loadingLogs ? 'animate-spin' : ''} /><span>{loadingLogs ? 'Refreshing' : 'Refresh'}</span></button><button class:log-tool-button-copied={logsCopied} class="log-tool-button" disabled={!logLines.length} on:click={copyLogs}>{#if logsCopied}<Check size={13} />{:else}<Copy size={13} />{/if}<span>{logsCopied ? 'Copied' : 'Copy'}</span></button><button class="log-tool-button" disabled={!logLines.length || downloadingLogs} on:click={downloadLogs}><Download size={13} /><span>{downloadingLogs ? 'Saving' : 'Download'}</span></button></div></div>
+              {#if loadingLogs && logLines.length === 0}<div class="log-opening-state"><span><RefreshCw size={22} class="animate-spin" /></span><div><p class="eyebrow">Opening logs</p><h3>{logTarget.pod}</h3><p>Connecting to the Pod and preparing the first live output. You can switch Pods from the left after it opens.</p></div></div>{:else}<pre class="live-log-output" bind:this={logViewport} aria-label={`${logTarget.pod} logs`}>{#if logLines.length}{visibleLogLines.length ? visibleLogLines.join('\n') : `No log lines match “${logSearch}”.`}{:else}The Pod returned no log lines for this container yet.{/if}</pre>{/if}
             </div>
           </section>
         {:else}
@@ -4523,7 +4661,7 @@
   {#if editorResource && editorObject && activeView !== 'Resources' && activeView !== 'Workloads'}
     <aside class="resource-editor-tab" aria-label={`${editorResource.kind} editor`}>
       <div class="resource-editor">
-        <div class="drawer-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><button aria-label="Close editor" on:click={() => closeEditor()}>×</button></div>
+        <div class="drawer-heading"><div><span class:custom={editorResource.custom}>{editorResource.kind === 'Secret' ? '◈' : editorResource.kind === 'ConfigMap' ? '◇' : '⌁'}</span><div><h2>{editorObject.name}</h2><p>{editorResource.kind} · {editorObject.namespace || 'cluster scoped'}</p></div></div><div class="inspector-heading-actions"><button class="secondary" disabled={loadingEditor} on:click={() => openYamlEditor(editorResource!, editorObject!)}>YAML</button><button aria-label="Close editor" on:click={() => closeEditor()}>×</button></div></div>
         {#if loadingEditor}
           <div class="drawer-state"><i></i>Loading live resource data…</div>
         {:else}
